@@ -1,0 +1,3949 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🏭 معمل كبس الكارتون</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0f1117;font-family:'Cairo',sans-serif}
+    ::-webkit-scrollbar{width:4px;height:4px}
+    ::-webkit-scrollbar-track{background:#0d1117}
+    ::-webkit-scrollbar-thumb{background:#2a3545;border-radius:2px}
+    select option{background:#0d1117}
+    tr:hover td{background:rgba(255,255,255,0.02)}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback } = React;
+
+// ==================== STORAGE HELPERS ====================
+const STORAGE_KEY  = "cardboard_factory_v1";
+const SB_CFG_KEY   = "cardboard_sb_cfg";   // إعدادات Supabase (localStorage)
+const SB_TOKEN_KEY = "cardboard_sb_token"; // JWT token بعد تسجيل الدخول
+
+// ── إعدادات Supabase — localStorage حقيقي ──
+function getSbCfg()    { try { return JSON.parse(localStorage.getItem(SB_CFG_KEY)  || "{}"); } catch { return {}; } }
+function setSbCfg(cfg) { try { localStorage.setItem(SB_CFG_KEY, JSON.stringify(cfg)); } catch {} }
+function getSbToken()  { try { return localStorage.getItem(SB_TOKEN_KEY) || ""; }        catch { return ""; } }
+function setSbToken(t) { try { if (t) localStorage.setItem(SB_TOKEN_KEY, t); else localStorage.removeItem(SB_TOKEN_KEY); } catch {} }
+function getSbRefreshToken()  { try { return localStorage.getItem(SB_TOKEN_KEY + "_refresh") || ""; } catch { return ""; } }
+function setSbRefreshToken(t) { try { if (t) localStorage.setItem(SB_TOKEN_KEY + "_refresh", t); else localStorage.removeItem(SB_TOKEN_KEY + "_refresh"); } catch {} }
+
+// ── IndexedDB حقيقي — سعة مئات الميجابايت ──
+const IDB_NAME    = "FactoryDB";
+const IDB_STORE   = "kv";
+const IDB_VERSION = 1;
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE, { keyPath: "key" });
+      }
+    };
+    req.onsuccess = (e) => resolve(e.target.result);
+    req.onerror   = (e) => reject(e.target.error);
+  });
+}
+
+const window_storage = {
+  get: async (key) => {
+    try {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const tx  = db.transaction(IDB_STORE, "readonly");
+        const req = tx.objectStore(IDB_STORE).get(key);
+        req.onsuccess = () => resolve(req.result ? { value: req.result.value } : null);
+        req.onerror   = () => reject(req.error);
+      });
+    } catch { return null; }
+  },
+  set: async (key, val) => {
+    try {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const tx  = db.transaction(IDB_STORE, "readwrite");
+        const req = tx.objectStore(IDB_STORE).put({ key, value: val });
+        req.onsuccess = () => resolve({ value: val });
+        req.onerror   = () => reject(req.error);
+      });
+    } catch { return null; }
+  },
+};
+
+// ══════════════════════════════════════════════════════
+// Supabase REST Client — بدون npm، يعمل بـ fetch مباشرة
+// يستخدم Auth الحقيقي (email/password ← JWT ← RLS)
+// ══════════════════════════════════════════════════════
+const sbAPI = {
+  // ── تسجيل الدخول: يُرجع access_token أو null ──
+  signIn: async (url, anonKey, email, password) => {
+    try {
+      const res = await fetch(`${url}/auth/v1/token?grant_type=password`, {
+        method: "POST",
+        headers: { apikey: anonKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      // حفظ refresh_token أيضاً
+      if (data.refresh_token) setSbRefreshToken(data.refresh_token);
+      return data.access_token || null;
+    } catch { return null; }
+  },
+
+  // ── تجديد التوكن تلقائياً قبل انتهاء الساعة ──
+  refreshToken: async (url, anonKey) => {
+    try {
+      const refreshToken = getSbRefreshToken();
+      if (!refreshToken) return null;
+      const res = await fetch(`${url}/auth/v1/token?grant_type=refresh_token`, {
+        method: "POST",
+        headers: { apikey: anonKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data.refresh_token) setSbRefreshToken(data.refresh_token);
+      if (data.access_token) setSbToken(data.access_token);
+      return data.access_token || null;
+    } catch { return null; }
+  },
+
+  // ── تسجيل الخروج ──
+  signOut: async (url, anonKey, token) => {
+    try {
+      await fetch(`${url}/auth/v1/logout`, {
+        method: "POST",
+        headers: { apikey: anonKey, Authorization: `Bearer ${token}` },
+      });
+    } catch {}
+  },
+
+  // ── قراءة البيانات (anon = قراءة فقط، JWT = قراءة+كتابة) ──
+  pull: async (url, anonKey, token) => {
+    try {
+      // anon يقرأ بدون JWT (RLS تسمح بـ SELECT لـ anon)
+      const bearer = token || anonKey;
+      const res = await fetch(
+        `${url}/rest/v1/factory_data?key=eq.main&select=value,updated_at`,
+        { headers: { apikey: anonKey, Authorization: `Bearer ${bearer}` } }
+      );
+      if (!res.ok) return null;
+      const rows = await res.json();
+      return rows && rows[0] ? rows[0] : null;
+    } catch { return null; }
+  },
+
+  // ── كتابة البيانات (يحتاج JWT — authenticated فقط بحسب RLS) ──
+  push: async (url, anonKey, token, payload) => {
+    try {
+      const res = await fetch(`${url}/rest/v1/factory_data`, {
+        method: "POST",
+        headers: {
+          apikey: anonKey,
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          Prefer: "resolution=merge-duplicates,return=minimal",
+        },
+        body: JSON.stringify({ key: "main", value: payload, updated_at: new Date().toISOString() }),
+      });
+      return res.ok;
+    } catch { return false; }
+  },
+};
+
+const defaultData = {
+  purchases: [],
+  sales: [],
+  machinery: [],
+  workers: [],
+  debts: [],
+  expenses: [],
+  pendingWeighs: [], // طابور الميزان — الشاحنات المحمّلة بانتظار الوزن الفارغ
+  pendingSales: [],  // طابور المبيعات — شحنات خارجة بانتظار تأكيد الوزن من العميل
+  partners: [
+    { id: 1, name: "أحمد", share: 33.33 },
+    { id: 2, name: "محمد", share: 33.33 },
+    { id: 3, name: "علي", share: 33.34 },
+  ],
+  settings: { factoryName: "معمل كبس الكارتون", currency: "د.ع" },
+};
+
+function useStorage() {
+  const [data, setData]             = useState(defaultData);
+  const [loaded, setLoaded]         = useState(false);
+  const [token, setToken]           = useState(() => getSbToken());   // JWT للكتابة
+  const [syncStatus, setSyncStatus] = useState("idle");
+  const [lastSync, setLastSync]     = useState(null);
+  const [showLogin, setShowLogin]   = useState(false);
+
+  const cfg      = getSbCfg();
+  const hasSb    = !!(cfg.url && cfg.key);
+  // isReadOnly: مفعّل عندما يكون mode=read (الموبايل) وبدون JWT
+  const isReadOnly = cfg.mode === "read" && !token;
+
+  // ── تحميل المحلي + مزامنة تنازلية أولية ──
+  useEffect(() => {
+    const load = async () => {
+      let localData = null;
+      try {
+        const r = await window_storage.get(STORAGE_KEY);
+        if (r?.value) localData = { ...defaultData, ...JSON.parse(r.value) };
+      } catch {}
+
+      if (hasSb) {
+        setSyncStatus("syncing");
+        try {
+          const remote = await sbAPI.pull(cfg.url, cfg.key, token || null);
+          if (remote?.value) {
+            const remoteData = { ...defaultData, ...JSON.parse(remote.value) };
+            const remoteTs   = remoteData?._ts || 0;
+            const localTs    = localData?._ts || 0;
+            // الموبايل يأخذ دائماً من السحابة
+            if (isReadOnly || remoteTs > localTs) {
+              localData = remoteData;
+              try { await window_storage.set(STORAGE_KEY, JSON.stringify(localData)); } catch {}
+              setLastSync(new Date());
+              setSyncStatus("ok");
+            } else if (!isReadOnly && localTs > remoteTs && token) {
+              // اللابتوب أحدث: ارفع البيانات العالقة فوراً عند فتح البرنامج
+              const ok = await sbAPI.push(cfg.url, cfg.key, token, JSON.stringify(localData));
+              setLastSync(new Date());
+              setSyncStatus(ok ? "ok" : "offline");
+            } else {
+              // متطابقان
+              setLastSync(new Date());
+              setSyncStatus("ok");
+            }
+          } else {
+            // السحابة فارغة — ارفع البيانات المحلية إن وجدت
+            if (!isReadOnly && localData && token) {
+              const ok = await sbAPI.push(cfg.url, cfg.key, token, JSON.stringify(localData));
+              setLastSync(new Date());
+              setSyncStatus(ok ? "ok" : "offline");
+            } else {
+              setSyncStatus(localData ? "offline" : "idle");
+            }
+          }
+        } catch { setSyncStatus("offline"); }
+      }
+
+      setData(localData || defaultData);
+      setLoaded(true);
+    };
+    load();
+  }, []); // eslint-disable-line
+
+  // ── تجديد التوكن تلقائياً كل 45 دقيقة ──
+  useEffect(() => {
+    if (!token || !hasSb) return;
+    const iv = setInterval(async () => {
+      const c2 = getSbCfg();
+      if (!c2.url || !c2.key) return;
+      const newToken = await sbAPI.refreshToken(c2.url, c2.key);
+      if (newToken) setToken(newToken);
+    }, 45 * 60 * 1000); // كل 45 دقيقة
+    return () => clearInterval(iv);
+  }, [token, hasSb]);
+
+  // ── Auto-refresh للموبايل كل 30 ثانية ──
+  useEffect(() => {
+    if (!isReadOnly || !hasSb) return;
+    const iv = setInterval(async () => {
+      setSyncStatus("syncing");
+      try {
+        const remote = await sbAPI.pull(cfg.url, cfg.key, null);
+        if (remote?.value) {
+          const nd = { ...defaultData, ...JSON.parse(remote.value) };
+          setData(nd);
+          await window_storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(() => {});
+          setLastSync(new Date());
+          setSyncStatus("ok");
+        }
+      } catch { setSyncStatus("offline"); }
+    }, 30000);
+    return () => clearInterval(iv);
+  }, [isReadOnly, hasSb, cfg.url, cfg.key]);
+
+  // ── حفظ: محلي فوراً + Supabase خلفياً (فقط مع JWT) ──
+  const save = useCallback(async (newData) => {
+    if (isReadOnly) return;
+    const stamped = { ...newData, _ts: Date.now() };
+    setData(stamped);
+    try { await window_storage.set(STORAGE_KEY, JSON.stringify(stamped)); } catch {}
+    const c2 = getSbCfg();
+    if (c2.url && c2.key && token) {
+      setSyncStatus("syncing");
+      const ok = await sbAPI.push(c2.url, c2.key, token, JSON.stringify(stamped));
+      if (ok) { setLastSync(new Date()); setSyncStatus("ok"); }
+      else setSyncStatus("offline");
+    }
+  }, [isReadOnly, token]);
+
+  // ── تسجيل الدخول (اللابتوب) ──
+  const signIn = useCallback(async (email, password) => {
+    const c2 = getSbCfg();
+    if (!c2.url || !c2.key) return "أدخل رابط Supabase ومفتاح anon في الإعدادات أولاً";
+    setSyncStatus("syncing");
+    const jwt = await sbAPI.signIn(c2.url, c2.key, email, password);
+    if (!jwt) { setSyncStatus("error"); return "الإيميل أو كلمة المرور غير صحيحة"; }
+    setSbToken(jwt);
+    setToken(jwt);
+    // تحديث mode إلى write بعد الدخول
+    setSbCfg({ ...c2, mode: "write" });
+    setSyncStatus("ok");
+    setShowLogin(false);
+    // مزامنة فورية
+    const remote = await sbAPI.pull(c2.url, c2.key, jwt);
+    if (remote?.value) {
+      const nd = { ...defaultData, ...JSON.parse(remote.value) };
+      setData(nd);
+      await window_storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(() => {});
+      setLastSync(new Date());
+    }
+    return null; // null = نجاح
+  }, []);
+
+  // ── تسجيل الخروج ──
+  const signOut = useCallback(async () => {
+    const c2 = getSbCfg();
+    if (token && c2.url && c2.key) await sbAPI.signOut(c2.url, c2.key, token);
+    setSbToken("");
+    setToken("");
+    setSyncStatus("idle");
+  }, [token]);
+
+  // ── مزامنة يدوية ──
+  // ── مزامنة يدوية ذكية (مع فحص من الأحدث) ──
+  const forceSync = useCallback(async () => {
+    const c2 = getSbCfg();
+    if (!c2.url || !c2.key) return;
+    setSyncStatus("syncing");
+    try {
+      // 1. جلب البيانات المحلية لمعرفة وقت التحديث
+      const localStr = await window_storage.get(STORAGE_KEY);
+      const localObj = localStr?.value ? JSON.parse(localStr.value) : null;
+      const localTs = localObj?._ts || 0;
+
+      // 2. جلب البيانات من السحابة
+      const remote = await sbAPI.pull(c2.url, c2.key, token || null);
+
+      if (remote?.value) {
+        const remoteObj = JSON.parse(remote.value);
+        const remoteTs = remoteObj?._ts || 0;
+
+        // 3. إذا كان اللابتوب أحدث → ارفع للسحابة
+        if (!isReadOnly && localTs > remoteTs && token) {
+          const ok = await sbAPI.push(c2.url, c2.key, token, JSON.stringify(localObj));
+          if (ok) { setLastSync(new Date()); setSyncStatus("ok"); }
+          else { setSyncStatus("offline"); }
+        }
+        // 4. إذا كانت السحابة أحدث أو موبايل → اسحب
+        else if (isReadOnly || remoteTs > localTs) {
+          const nd = { ...defaultData, ...remoteObj };
+          setData(nd);
+          await window_storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(() => {});
+          setLastSync(new Date());
+          setSyncStatus("ok");
+        } else {
+          // متطابقان
+          setLastSync(new Date());
+          setSyncStatus("ok");
+        }
+      } else {
+        // السحابة فارغة → ارفع بيانات اللابتوب فوراً
+        if (!isReadOnly && localObj && token) {
+          const ok = await sbAPI.push(c2.url, c2.key, token, JSON.stringify(localObj));
+          if (ok) { setLastSync(new Date()); setSyncStatus("ok"); }
+          else setSyncStatus("offline");
+        } else {
+          setSyncStatus("offline");
+        }
+      }
+    } catch { setSyncStatus("error"); }
+  }, [token, isReadOnly]);
+
+  // ── تحديث إعدادات Supabase من الإعدادات ──
+  const updateSbCfg = useCallback((newCfg) => {
+    setSbCfg(newCfg);
+    if (!newCfg.url || !newCfg.key) { setToken(""); setSbToken(""); }
+  }, []);
+
+  return {
+    data, save, loaded,
+    token, hasSb, isReadOnly,
+    syncStatus, lastSync,
+    signIn, signOut, forceSync, updateSbCfg,
+    showLogin, setShowLogin,
+  };
+}
+
+// ==================== FORMATTERS ====================
+const fmt = (n) =>
+  new Intl.NumberFormat("ar-IQ").format(Math.round(n || 0)) + " د.ع";
+const fmtNum = (n) => new Intl.NumberFormat("ar-IQ").format(n || 0);
+// توقيت العراق UTC+3
+// توقيت العراق UTC+3 صحيح رياضياً
+const today = () => {
+  const now = new Date();
+  const iraqTime = new Date(now.getTime() + (3 * 60 * 60000));
+  return iraqTime.toISOString().split("T")[0];
+};
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
+
+// ==================== ICONS ====================
+const Icon = ({ name, size = 20 }) => {
+  const icons = {
+    dashboard: "📊",
+    purchases: "📦",
+    sales: "💰",
+    machinery: "⚙️",
+    workers: "👷",
+    debts: "📋",
+    reports: "📈",
+    settings: "🔧",
+    add: "➕",
+    delete: "🗑️",
+    edit: "✏️",
+    save: "💾",
+    close: "✕",
+    profit: "📈",
+    loss: "📉",
+    factory: "🏭",
+    alert: "⚠️",
+    check: "✅",
+    menu: "☰",
+    expenses: "🧾",
+  };
+  return <span style={{ fontSize: size }}>{icons[name] || "•"}</span>;
+};
+
+// ==================== STYLES ====================
+const S = {
+  app: {
+    fontFamily: "'Cairo', 'Amiri', sans-serif",
+    direction: "rtl",
+    background: "#0f1117",
+    minHeight: "100vh",
+    color: "#e8e0d5",
+    display: "flex",
+    flexDirection: "column",
+  },
+  header: {
+    background: "linear-gradient(135deg, #1a1f2e 0%, #0f1420 100%)",
+    borderBottom: "2px solid #c8860a",
+    padding: "12px 16px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    position: "sticky",
+    top: 0,
+    zIndex: 100,
+    boxShadow: "0 4px 20px rgba(200,134,10,0.15)",
+  },
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: 700,
+    color: "#f0b429",
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  },
+  nav: {
+    background: "#13181f",
+    display: "flex",
+    overflowX: "auto",
+    borderBottom: "1px solid #1e2530",
+    padding: "0 8px",
+  },
+  navBtn: (active) => ({
+    padding: "10px 14px",
+    whiteSpace: "nowrap",
+    background: "none",
+    border: "none",
+    color: active ? "#f0b429" : "#7a8a9a",
+    borderBottom: active ? "2px solid #f0b429" : "2px solid transparent",
+    cursor: "pointer",
+    fontSize: 13,
+    fontFamily: "inherit",
+    fontWeight: active ? 700 : 400,
+    transition: "all 0.2s",
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+  }),
+  content: {
+    flex: 1,
+    padding: 16,
+    maxWidth: 900,
+    margin: "0 auto",
+    width: "100%",
+  },
+  card: {
+    background: "#161b25",
+    border: "1px solid #1e2a38",
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+  },
+  cardTitle: {
+    fontSize: 16,
+    fontWeight: 700,
+    color: "#f0b429",
+    marginBottom: 12,
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  },
+  kpiGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, 1fr)",
+    gap: 12,
+    marginBottom: 16,
+  },
+  kpi: (color) => ({
+    background: `linear-gradient(135deg, ${color}22 0%, #161b25 100%)`,
+    border: `1px solid ${color}44`,
+    borderRadius: 12,
+    padding: "14px 12px",
+    textAlign: "center",
+  }),
+  kpiVal: { fontSize: 18, fontWeight: 700, color: "#f0e6c8", marginBottom: 4 },
+  kpiLabel: { fontSize: 11, color: "#7a8a9a" },
+  input: {
+    width: "100%",
+    background: "#0d1117",
+    border: "1px solid #2a3545",
+    borderRadius: 8,
+    padding: "10px 12px",
+    color: "#e8e0d5",
+    fontSize: 14,
+    fontFamily: "inherit",
+    boxSizing: "border-box",
+    outline: "none",
+  },
+  label: { fontSize: 12, color: "#7a8a9a", marginBottom: 4, display: "block" },
+  formGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, 1fr)",
+    gap: 12,
+    marginBottom: 12,
+  },
+  formField: { display: "flex", flexDirection: "column" },
+  btn: (color = "#c8860a") => ({
+    background: `linear-gradient(135deg, ${color} 0%, ${color}cc 100%)`,
+    border: "none",
+    borderRadius: 8,
+    padding: "10px 20px",
+    color: "#0f1117",
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: "pointer",
+    fontFamily: "inherit",
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    justifyContent: "center",
+    transition: "opacity 0.2s",
+  }),
+  btnDanger: {
+    background: "none",
+    border: "1px solid #e5544444",
+    borderRadius: 6,
+    padding: "4px 8px",
+    color: "#e55444",
+    cursor: "pointer",
+    fontSize: 12,
+    fontFamily: "inherit",
+  },
+  table: {
+    width: "100%",
+    borderCollapse: "collapse",
+    fontSize: 12,
+    overflowX: "auto",
+    display: "block",
+  },
+  th: {
+    padding: "10px 8px",
+    background: "#0d1117",
+    color: "#f0b429",
+    textAlign: "right",
+    fontWeight: 700,
+    borderBottom: "2px solid #c8860a44",
+    whiteSpace: "nowrap",
+  },
+  td: {
+    padding: "9px 8px",
+    borderBottom: "1px solid #1e2530",
+    verticalAlign: "middle",
+    whiteSpace: "nowrap",
+  },
+  badge: (color) => ({
+    background: color + "22",
+    color: color,
+    border: `1px solid ${color}44`,
+    borderRadius: 20,
+    padding: "2px 10px",
+    fontSize: 11,
+    fontWeight: 600,
+  }),
+  select: {
+    width: "100%",
+    background: "#0d1117",
+    border: "1px solid #2a3545",
+    borderRadius: 8,
+    padding: "10px 12px",
+    color: "#e8e0d5",
+    fontSize: 14,
+    fontFamily: "inherit",
+    outline: "none",
+  },
+  divider: {
+    height: 1,
+    background: "linear-gradient(to right, transparent, #2a3545, transparent)",
+    margin: "16px 0",
+  },
+  profitBox: (isProfit) => ({
+    background: isProfit
+      ? "linear-gradient(135deg, #1a3a1a, #0d1117)"
+      : "linear-gradient(135deg, #3a1a1a, #0d1117)",
+    border: `2px solid ${isProfit ? "#4caf50" : "#e55444"}`,
+    borderRadius: 12,
+    padding: 20,
+    textAlign: "center",
+    marginBottom: 16,
+  }),
+  emptyState: {
+    textAlign: "center",
+    padding: "40px 20px",
+    color: "#4a5a6a",
+    fontSize: 14,
+  },
+};
+
+// ==================== MODAL ====================
+function Modal({ title, onClose, children }) {
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.8)",
+        zIndex: 200,
+        display: "flex",
+        alignItems: "flex-end",
+        justifyContent: "center",
+        padding: 0,
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: "#161b25",
+          border: "1px solid #2a3545",
+          borderRadius: "16px 16px 0 0",
+          width: "100%",
+          maxWidth: 600,
+          maxHeight: "90vh",
+          overflowY: "auto",
+          padding: 20,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: 16,
+          }}
+        >
+          <span style={{ fontSize: 16, fontWeight: 700, color: "#f0b429" }}>
+            {title}
+          </span>
+          <button
+            onClick={onClose}
+            style={{
+              background: "none",
+              border: "none",
+              color: "#7a8a9a",
+              cursor: "pointer",
+              fontSize: 18,
+            }}
+          >
+            ✕
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ==================== DASHBOARD ====================
+function Dashboard({ data, unlocked }) {
+  const todayStr = today();
+  const queueCount = (data.pendingWeighs || []).length;
+  const salesQueueCount = (data.pendingSales || []).length;
+
+  // Only operational data - no money amounts shown to accountant
+  const todaySalesCount = data.sales.filter(s => s.date === todayStr).length;
+  const todayPurchasesCount = data.purchases.filter(p => p.date === todayStr).length;
+  const todayMachineryCount = data.machinery.filter(m => m.date === todayStr).length;
+  const totalDebtsOpen = data.debts.filter(d => d.status !== "paid").length;
+
+  // Only calculate financial data when unlocked
+  const totalPurchases = unlocked ? data.purchases.reduce((s, p) => s + (p.total || 0), 0) : 0;
+  const totalSales = unlocked ? data.sales.reduce((s, p) => s + (p.total || 0), 0) : 0;
+  const totalWorkers = unlocked ? data.workers.reduce((s, w) => {
+    return s + (w.wage||0) + (w.extraPay||0) - (w.advance||0);
+  }, 0) : 0;
+  const totalMachinery = unlocked ? data.machinery.reduce((s, m) => s + (m.amount || 0), 0) : 0;
+  const totalExpensesGen = unlocked ? (data.expenses || []).reduce((s, e) => s + (e.amount || 0), 0) : 0;
+  const netProfit = totalSales - (totalPurchases + totalWorkers + totalMachinery + totalExpensesGen);
+  const isProfit = netProfit >= 0;
+
+  const pendingDebtsIn = unlocked ? data.debts
+    .filter(d => d.type === "customer" && d.status !== "paid")
+    .reduce((s, d) => s + ((d.amount || 0) - (d.payments || []).reduce((a, p) => a + p.amount, 0)), 0) : 0;
+  const pendingDebtsOut = unlocked ? data.debts
+    .filter(d => d.type === "supplier" && d.status !== "paid")
+    .reduce((s, d) => s + ((d.amount || 0) - (d.payments || []).reduce((a, p) => a + p.amount, 0)), 0) : 0;
+
+  const todaySalesTotal = unlocked ? data.sales.filter(s => s.date === todayStr).reduce((s, p) => s + p.total, 0) : 0;
+  const todayPurchasesTotal = unlocked ? data.purchases.filter(p => p.date === todayStr).reduce((s, p) => s + p.total, 0) : 0;
+  const todayMachineryTotal = unlocked ? data.machinery.filter(m => m.date === todayStr).reduce((s, m) => s + m.amount, 0) : 0;
+  const todayExpensesTotal = unlocked ? (data.expenses || []).filter(e => e.date === todayStr).reduce((s, e) => s + e.amount, 0) : 0;
+  const todayNet = todaySalesTotal - (todayPurchasesTotal + todayMachineryTotal + todayExpensesTotal);
+
+  return (
+    <>
+      {/* Header status */}
+      <div style={{ textAlign: "center", padding: "8px 0 16px" }}>
+        <div style={{ fontSize: 11, color: "#7a8a9a" }}>
+          {new Date().toLocaleDateString("ar-IQ", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
+        </div>
+      </div>
+
+      {/* Queue alert - always visible */}
+      {queueCount > 0 && (
+        <div style={{ background: "#1a1200", border: "1px solid #e67e2266", borderRadius: 10, padding: "12px 14px", marginBottom: 12, display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 22 }}>⏳</span>
+          <div>
+            <div style={{ fontSize: 13, color: "#e67e22", fontWeight: 700 }}>{queueCount} شاحنة في الطابور — تنتظر وزن العودة</div>
+            <div style={{ fontSize: 11, color: "#7a8a9a" }}>انتقل لصفحة المشتريات لإتمام العملية</div>
+          </div>
+        </div>
+      )}
+
+      {/* Sales queue alert */}
+      {salesQueueCount > 0 && (
+        <div style={{ background: "#0a150a", border: "1px solid #27ae6066", borderRadius: 10, padding: "12px 14px", marginBottom: 12, display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 22 }}>📦</span>
+          <div>
+            <div style={{ fontSize: 13, color: "#27ae60", fontWeight: 700 }}>{salesQueueCount} شحنة مبيعات معلقة — بانتظار تأكيد الوزن</div>
+            <div style={{ fontSize: 11, color: "#7a8a9a" }}>انتقل لصفحة المبيعات لإدخال الوزن الفعلي من العميل</div>
+          </div>
+        </div>
+      )}
+
+      {/* Operational counters - safe for accountant */}
+      {!unlocked && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10, marginBottom: 12 }}>
+            {[
+              { l: "مبيعات اليوم", v: `${todaySalesCount} عملية`, c: "#4caf50", icon: "📦" },
+              { l: "مشتريات اليوم", v: `${todayPurchasesCount} عملية`, c: "#e67e22", icon: "🚚" },
+              { l: "مصاريف آليات اليوم", v: `${todayMachineryCount} سجل`, c: "#9b59b6", icon: "⚙️" },
+              { l: "ديون معلقة", v: `${totalDebtsOpen} دين`, c: "#f0b429", icon: "📋" },
+            ].map((k, i) => (
+              <div key={i} style={{ background: "#0d1117", border: `1px solid ${k.c}22`, borderRadius: 10, padding: "14px 12px", textAlign: "center" }}>
+                <div style={{ fontSize: 22, marginBottom: 4 }}>{k.icon}</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: k.c }}>{k.v}</div>
+                <div style={{ fontSize: 11, color: "#7a8a9a", marginTop: 3 }}>{k.l}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ ...({ background: "#0d1117", borderRadius: 12, padding: 16, border: "1px solid #1e2530", marginBottom: 12 }), textAlign: "center" }}>
+            <div style={{ fontSize: 32, marginBottom: 8 }}>🔒</div>
+            <div style={{ fontSize: 14, color: "#7a8a9a" }}>بيانات الأرباح والمبالغ محمية</div>
+            <div style={{ fontSize: 12, color: "#4a5a6a", marginTop: 4 }}>للوصول انتقل إلى التقارير وأدخل كلمة المرور</div>
+          </div>
+
+          {/* Recent operations - names only, no amounts */}
+          <div style={{ background: "#0d1117", borderRadius: 12, padding: 14, border: "1px solid #1e2530" }}>
+            <div style={{ fontSize: 13, color: "#f0b429", fontWeight: 700, marginBottom: 10 }}>🕐 آخر العمليات</div>
+            {[
+              ...data.purchases.slice(-3).map(p => ({ text: `شراء من ${p.supplier}`, date: p.date, icon: "🚚" })),
+              ...data.sales.slice(-3).map(s => ({ text: `بيع لـ ${s.customer}`, date: s.date, icon: "📦" })),
+            ].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5).map((item, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid #1e2530", fontSize: 13 }}>
+                <span>{item.icon}</span>
+                <span style={{ color: "#c8d0da", flex: 1 }}>{item.text}</span>
+                <span style={{ color: "#4a5a6a", fontSize: 11 }}>{item.date}</span>
+              </div>
+            ))}
+            {data.purchases.length === 0 && data.sales.length === 0 && (
+              <div style={{ textAlign: "center", color: "#4a5a6a", fontSize: 12 }}>لا توجد عمليات بعد</div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* UNLOCKED: show everything */}
+      {unlocked && (
+        <>
+          {/* Today */}
+          <div style={{ background: "#0a1020", border: "1px solid #4a90e244", borderRadius: 12, padding: 14, marginBottom: 12 }}>
+            <div style={{ fontSize: 13, color: "#4a90e2", fontWeight: 700, marginBottom: 10 }}>📅 تقرير اليوم — تلقائي</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8 }}>
+              {[
+                { l: "مبيعات", v: fmt(todaySalesTotal), c: "#4caf50" },
+                { l: "مشتريات", v: fmt(todayPurchasesTotal), c: "#e67e22" },
+                { l: "مصاريف", v: fmt(todayMachineryTotal + todayExpensesTotal), c: "#e55444" },
+                { l: todayNet >= 0 ? "ربح اليوم" : "خسارة اليوم", v: fmt(Math.abs(todayNet)), c: todayNet >= 0 ? "#4caf50" : "#e55444" },
+              ].map((k, i) => (
+                <div key={i} style={{ background: "#0d1117", borderRadius: 8, padding: "10px 6px", textAlign: "center" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: k.c }}>{k.v}</div>
+                  <div style={{ fontSize: 10, color: "#7a8a9a", marginTop: 3 }}>{k.l}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10, marginBottom: 12 }}>
+            {[
+              { l: "إجمالي المبيعات", v: fmt(totalSales), c: "#f0b429" },
+              { l: "إجمالي المشتريات", v: fmt(totalPurchases), c: "#4a90e2" },
+              { l: "ديون الزبائن", v: fmt(pendingDebtsIn), c: "#27ae60" },
+              { l: "ديون المجهزين", v: fmt(pendingDebtsOut), c: "#e74c3c" },
+            ].map((k, i) => (
+              <div key={i} style={{ background: "#0d1117", border: `1px solid ${k.c}33`, borderRadius: 10, padding: "14px 10px", textAlign: "center" }}>
+                <div style={{ fontSize: 16, fontWeight: 700, color: k.c }}>{k.v}</div>
+                <div style={{ fontSize: 11, color: "#7a8a9a", marginTop: 4 }}>{k.l}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Profit */}
+          <div style={{ background: isProfit ? "#0a140a" : "#140a0a", border: `2px solid ${isProfit ? "#4caf5066" : "#e5544466"}`, borderRadius: 12, padding: 16, marginBottom: 12, textAlign: "center" }}>
+            <div style={{ fontSize: 13, color: "#7a8a9a", marginBottom: 6 }}>الربح الصافي الإجمالي</div>
+            <div style={{ fontSize: 28, fontWeight: 700, color: isProfit ? "#4caf50" : "#e55444" }}>
+              {isProfit ? "▲" : "▼"} {fmt(Math.abs(netProfit))}
+            </div>
+          </div>
+
+          {/* Partners */}
+          <div style={{ background: "#0d1117", borderRadius: 12, padding: 14, border: "1px solid #2a3545", marginBottom: 12 }}>
+            <div style={{ fontSize: 13, color: "#f0b429", fontWeight: 700, marginBottom: 10 }}>🤝 توزيع الأرباح</div>
+            {isProfit ? (
+              <div style={{ display: "grid", gridTemplateColumns: `repeat(${data.partners.length},1fr)`, gap: 8 }}>
+                {data.partners.map(p => (
+                  <div key={p.id} style={{ background: "#0a0e15", borderRadius: 8, padding: "10px 8px", textAlign: "center" }}>
+                    <div style={{ fontWeight: 700, color: "#e8e0d5", fontSize: 13 }}>{p.name}</div>
+                    <div style={{ fontSize: 11, color: "#7a8a9a" }}>{p.share}%</div>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: "#4caf50", marginTop: 6 }}>{fmt((netProfit * p.share) / 100)}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ textAlign: "center", color: "#e55444", fontSize: 13 }}>⚠️ لا يوجد ربح للتوزيع</div>
+            )}
+          </div>
+
+          {/* Recent ops with amounts */}
+          <div style={{ background: "#0d1117", borderRadius: 12, padding: 14, border: "1px solid #1e2530" }}>
+            <div style={{ fontSize: 13, color: "#f0b429", fontWeight: 700, marginBottom: 10 }}>🕐 آخر العمليات</div>
+            {[
+              ...data.purchases.slice(-3).map(p => ({ text: `شراء ${fmtNum(p.weight)} كغم من ${p.supplier}`, amount: -p.total, date: p.date })),
+              ...data.sales.slice(-3).map(s => ({ text: `بيع ${fmtNum(s.weight)} طن لـ ${s.customer}`, amount: s.total, date: s.date })),
+            ].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5).map((item, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #1e2530", fontSize: 13 }}>
+                <span style={{ color: "#c8d0da" }}>{item.text}</span>
+                <span style={{ color: item.amount > 0 ? "#4caf50" : "#e55444" }}>{item.amount > 0 ? "+" : ""}{fmt(item.amount)}</span>
+              </div>
+            ))}
+            {data.purchases.length === 0 && data.sales.length === 0 && (
+              <div style={{ textAlign: "center", color: "#4a5a6a", fontSize: 12 }}>لا توجد عمليات بعد</div>
+            )}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+
+// ==================== AUTOCOMPLETE INPUT ====================
+function AutocompleteInput({ value, onChange, suggestions, placeholder, style }) {
+  const [show, setShow] = useState(false);
+  const filtered = value.length >= 1
+    ? [...new Set(suggestions.filter(s => s && s.includes(value) && s !== value))].slice(0, 6)
+    : [];
+
+  return (
+    <div style={{ position: "relative" }}>
+      <input
+        style={style}
+        value={value}
+        placeholder={placeholder}
+        onChange={e => { onChange(e.target.value); setShow(true); }}
+        onFocus={() => setShow(true)}
+        onBlur={() => setTimeout(() => setShow(false), 150)}
+        autoComplete="off"
+      />
+      {show && filtered.length > 0 && (
+        <div style={{
+          position: "absolute", top: "100%", right: 0, left: 0, zIndex: 999,
+          background: "#1a2535", border: "1px solid #2a3545", borderRadius: 8,
+          overflow: "hidden", boxShadow: "0 4px 20px rgba(0,0,0,0.5)",
+        }}>
+          {filtered.map((s, i) => (
+            <div
+              key={i}
+              style={{
+                padding: "9px 12px", cursor: "pointer", fontSize: 13,
+                color: "#e8e0d5", borderBottom: i < filtered.length - 1 ? "1px solid #2a3545" : "none",
+                display: "flex", alignItems: "center", gap: 8,
+              }}
+              onMouseDown={() => { onChange(s); setShow(false); }}
+            >
+              <span style={{ color: "#f0b429", fontSize: 11 }}>🔍</span>
+              {s}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ==================== SYNC BADGE ====================
+// ══════════════════════════════════════════════════════
+// SYNC BAR — شريط المزامنة والمصادقة في الهيدر
+// ══════════════════════════════════════════════════════
+function SyncBar({ hasSb, isReadOnly, token, syncStatus, lastSync, forceSync, onLoginClick, onSignOut }) {
+  const ST = {
+    idle:    { color: "#4a5a6a", dot: "○" },
+    syncing: { color: "#f0b429", dot: "↻" },
+    ok:      { color: "#27ae60", dot: "✓" },
+    error:   { color: "#e55444", dot: "✕" },
+    offline: { color: "#e67e22", dot: "⚡" },
+  }[syncStatus] || { color: "#4a5a6a", dot: "○" };
+
+  if (!hasSb) {
+    return (
+      <span style={{ fontSize: 10, color: "#4a5a6a", cursor: "pointer" }} title="Supabase غير مُعدّ">
+        ☁ بدون مزامنة
+      </span>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+      {/* حالة المزامنة */}
+      <button onClick={forceSync} title="مزامنة الآن" style={{
+        background: "none", border: `1px solid ${ST.color}66`, borderRadius: 8,
+        padding: "3px 8px", cursor: "pointer", fontSize: 10, color: ST.color,
+        fontFamily: "inherit", display: "flex", alignItems: "center", gap: 3,
+      }}>
+        <span style={{ fontSize: 12 }}>{ST.dot}</span>
+        <span>
+          {syncStatus === "syncing" ? "مزامنة..." :
+           syncStatus === "ok"      ? (lastSync ? new Date(lastSync.getTime() + (3 * 60 * 60000) - (lastSync.getTimezoneOffset() * 60000)).toISOString().slice(11,16).replace(":", ":") + " ✓" : "متزامن") :
+           syncStatus === "offline" ? "Offline" :
+           syncStatus === "error"   ? "خطأ" : "☁"}
+        </span>
+      </button>
+
+      {/* وضع القراءة أو زر الدخول */}
+      {isReadOnly ? (
+        <span style={{
+          background: "#1a0a25", border: "1px solid #9b59b688",
+          borderRadius: 8, padding: "3px 8px", fontSize: 10, color: "#9b59b6", fontWeight: 700,
+        }}>
+          👁 مشاهدة
+        </span>
+      ) : token ? (
+        <button onClick={onSignOut} title="تسجيل الخروج" style={{
+          background: "none", border: "1px solid #27ae6066", borderRadius: 8,
+          padding: "3px 8px", cursor: "pointer", fontSize: 10, color: "#27ae60", fontFamily: "inherit",
+        }}>
+          ✅ مدخل
+        </button>
+      ) : (
+        <button onClick={onLoginClick} style={{
+          background: "linear-gradient(135deg, #4a90e2, #2980b9)",
+          border: "none", borderRadius: 8, padding: "3px 10px",
+          cursor: "pointer", fontSize: 10, color: "#fff", fontFamily: "inherit", fontWeight: 700,
+        }}>
+          🔑 دخول
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════
+// LOGIN MODAL — نافذة تسجيل الدخول
+// ══════════════════════════════════════════════════════
+function LoginModal({ onSignIn, onClose, onReadOnly }) {
+  const [email, setEmail]   = useState("");
+  const [pass, setPass]     = useState("");
+  const [err, setErr]       = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleLogin = async () => {
+    if (!email || !pass) { setErr("أدخل الإيميل وكلمة المرور"); return; }
+    setLoading(true); setErr("");
+    const error = await onSignIn(email, pass);
+    setLoading(false);
+    if (error) setErr(error);
+  };
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      zIndex: 9999, padding: 16,
+    }}>
+      <div style={{
+        background: "#161d2b", borderRadius: 16, padding: 28,
+        width: "100%", maxWidth: 380, border: "1px solid #2a3545",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.7)",
+      }}>
+        {/* Header */}
+        <div style={{ textAlign: "center", marginBottom: 24 }}>
+          <div style={{ fontSize: 40, marginBottom: 8 }}>🔐</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "#e8e0d5" }}>دخول المحاسب</div>
+          <div style={{ fontSize: 12, color: "#7a8a9a", marginTop: 4 }}>
+            للإدخال والتعديل — اللابتوب فقط
+          </div>
+        </div>
+
+        {/* الحقول */}
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ fontSize: 12, color: "#7a8a9a", display: "block", marginBottom: 4 }}>
+            الإيميل
+          </label>
+          <input
+            type="email"
+            style={{
+              width: "100%", background: "#0d1117", border: "1px solid #2a3545",
+              borderRadius: 8, padding: "10px 12px", color: "#e8e0d5",
+              fontFamily: "inherit", fontSize: 14, outline: "none",
+            }}
+            placeholder="accountant@maamal.com"
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleLogin()}
+          />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ fontSize: 12, color: "#7a8a9a", display: "block", marginBottom: 4 }}>
+            كلمة المرور
+          </label>
+          <input
+            type="password"
+            style={{
+              width: "100%", background: "#0d1117", border: "1px solid #2a3545",
+              borderRadius: 8, padding: "10px 12px", color: "#e8e0d5",
+              fontFamily: "inherit", fontSize: 14, outline: "none",
+            }}
+            placeholder="••••••••"
+            value={pass}
+            onChange={e => setPass(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleLogin()}
+          />
+        </div>
+
+        {err && (
+          <div style={{
+            background: "#1a0808", border: "1px solid #e5544444",
+            borderRadius: 8, padding: "8px 12px", fontSize: 12, color: "#e55444", marginBottom: 12,
+          }}>
+            ⚠️ {err}
+          </div>
+        )}
+
+        {/* أزرار */}
+        <button
+          style={{
+            width: "100%", background: loading ? "#1a2535" : "linear-gradient(135deg, #4a90e2, #2980b9)",
+            border: "none", borderRadius: 10, padding: "12px",
+            color: "#fff", cursor: loading ? "not-allowed" : "pointer",
+            fontFamily: "inherit", fontSize: 14, fontWeight: 700, marginBottom: 10,
+          }}
+          onClick={handleLogin}
+          disabled={loading}
+        >
+          {loading ? "جاري التحقق..." : "🔑 دخول للإدخال الكامل"}
+        </button>
+
+        <button
+          style={{
+            width: "100%", background: "none", border: "1px solid #9b59b666",
+            borderRadius: 10, padding: "10px", color: "#9b59b6",
+            cursor: "pointer", fontFamily: "inherit", fontSize: 13, marginBottom: 10,
+          }}
+          onClick={onReadOnly}
+        >
+          👁 متابعة كمشاهد فقط (الموبايل)
+        </button>
+
+        <button
+          style={{
+            width: "100%", background: "none", border: "1px solid #2a3545",
+            borderRadius: 10, padding: "8px", color: "#4a5a6a",
+            cursor: "pointer", fontFamily: "inherit", fontSize: 12,
+          }}
+          onClick={onClose}
+        >
+          استخدام بدون مزامنة (محلي فقط)
+        </button>
+
+        <div style={{ fontSize: 10, color: "#3a4a5a", marginTop: 12, textAlign: "center", lineHeight: 1.6 }}>
+          بيانات الدخول تُنشأ في Supabase → Authentication → Users
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ==================== SCALE WIDGET ====================
+function ScaleWidget({ onRead, field }) {
+  const [reading, setReading] = useState(null);
+  const [simulating, setSimulating] = useState(false);
+
+  // Simulate reading from scale (in real deployment replace with Serial/WebSerial API)
+  const simulateScale = () => {
+    setSimulating(true);
+    setReading("جاري القراءة...");
+    setTimeout(() => {
+      // Random realistic truck weight: 8000–25000 kg
+      const val = field === "grossWeight"
+        ? Math.floor(Math.random() * 12000 + 13000)
+        : Math.floor(Math.random() * 4000 + 6000);
+      setReading(val);
+      setSimulating(false);
+      onRead(val);
+    }, 1800);
+  };
+
+  return (
+    <div style={{
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      marginTop: 4,
+    }}>
+      <button
+        type="button"
+        onClick={simulateScale}
+        disabled={simulating}
+        style={{
+          background: simulating ? "#1a2a1a" : "linear-gradient(135deg,#27ae60,#1a7a45)",
+          border: "1px solid #27ae60",
+          borderRadius: 6,
+          padding: "4px 10px",
+          color: simulating ? "#4caf50" : "#fff",
+          fontSize: 11,
+          cursor: simulating ? "not-allowed" : "pointer",
+          fontFamily: "inherit",
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+          whiteSpace: "nowrap",
+        }}
+      >
+        {simulating ? "⏳ قراءة..." : "⚖️ قراءة الميزان"}
+      </button>
+      {reading && !simulating && (
+        <span style={{ fontSize: 11, color: "#4caf50" }}>✅ {fmtNum(reading)} كغم</span>
+      )}
+    </div>
+  );
+}
+
+// ==================== PURCHASES (QUEUE SYSTEM) ====================
+function Purchases({ data, save, isReadOnly }) {
+  const [editId, setEditId] = useState(null);
+  const [editForm, setEditForm] = useState({});
+
+  const canEdit = (recordDate) => {
+    if (recordDate === today()) return true;
+    const pw = window.prompt("سجل من يوم سابق — أدخل كلمة مرور المالك:");
+    return pw === (data.settings?.reportPassword || "owner1234");
+  };
+
+  const startEdit = (rec) => {
+    if (!canEdit(rec.date)) return;
+    setEditId(rec.id);
+    setEditForm({ supplier: rec.supplier, grossWeight: rec.grossWeight||rec.weight, tareWeight: rec.tareWeight||0, price: rec.price, payType: rec.payType, notes: rec.notes||"" });
+  };
+
+  const saveEdit = (id) => {
+    const gw = parseFloat(editForm.grossWeight)||0;
+    const tw = parseFloat(editForm.tareWeight)||0;
+    const pr = parseFloat(editForm.price)||0;
+    const net = gw - tw;
+    const total = net * pr;
+    save({ ...data, purchases: data.purchases.map(p => p.id === id ? {
+      ...p, supplier: editForm.supplier, grossWeight: gw, tareWeight: tw, weight: net, price: pr, payType: editForm.payType, notes: editForm.notes, total
+    } : p) });
+    setEditId(null);
+  };
+
+  const [p1, setP1] = useState({ supplier: "", grossWeight: "", price: "", payType: "cash", date: today(), notes: "" });
+  const [completing, setCompleting] = useState(null);
+  const [tareVal, setTareVal] = useState("");
+  const [simulating, setSimulating] = useState("");
+
+  const pending = data.pendingWeighs || [];
+
+  const scaleRead = (field, cb) => {
+    setSimulating(field);
+    setTimeout(() => {
+      const v = field === "gross"
+        ? Math.floor(Math.random() * 12000 + 13000)
+        : Math.floor(Math.random() * 4000 + 6000);
+      cb(v); setSimulating("");
+    }, 1500);
+  };
+
+  const addToQueue = () => {
+    if (!p1.supplier || !p1.grossWeight || !p1.price) return;
+    const ticket = {
+      id: uid(), supplier: p1.supplier,
+      grossWeight: parseFloat(p1.grossWeight), price: parseFloat(p1.price),
+      payType: p1.payType, date: p1.date, notes: p1.notes,
+      time: new Date().toLocaleTimeString("ar-IQ", { hour: "2-digit", minute: "2-digit" }),
+    };
+    save({ ...data, pendingWeighs: [...pending, ticket] });
+    setP1(f => ({ ...f, supplier: "", grossWeight: "", notes: "" }));
+  };
+
+  const completeTicket = (ticket) => {
+    const tare = parseFloat(tareVal);
+    if (!tare || tare >= ticket.grossWeight) return;
+    const netWeight = ticket.grossWeight - tare;
+    const total = netWeight * ticket.price;
+    const rec = { id: uid(), supplier: ticket.supplier, grossWeight: ticket.grossWeight, tareWeight: tare, weight: netWeight, price: ticket.price, payType: ticket.payType, date: ticket.date, notes: ticket.notes, total };
+    const newPending = pending.filter(p => p.id !== ticket.id);
+    const newData = { ...data, purchases: [...data.purchases, rec], pendingWeighs: newPending };
+    if (ticket.payType === "deferred") {
+      newData.debts = [...(data.debts || []), { id: uid(), type: "supplier", name: ticket.supplier, amount: total, date: ticket.date, notes: `شراء ${netWeight} كغم صافي`, status: "pending" }];
+    }
+    save(newData); setCompleting(null); setTareVal("");
+  };
+
+  const del = (id) => save({ ...data, purchases: data.purchases.filter(p => p.id !== id) });
+  const removeQueue = (id) => save({ ...data, pendingWeighs: pending.filter(p => p.id !== id) });
+
+  return (
+    <>
+      <h2 style={{ color: "#f0b429", margin: "0 0 16px 0", fontSize: 18 }}>📦 المشتريات — نظام الطابور</h2>
+
+      <div style={{ ...S.kpiGrid, gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 16 }}>
+        <div style={S.kpi("#4a90e2")}><div style={S.kpiVal}>{data.purchases.length}</div><div style={S.kpiLabel}>شحنات مكتملة</div></div>
+        <div style={S.kpi("#e67e22")}><div style={S.kpiVal}>{fmtNum(data.purchases.reduce((s,p)=>s+(p.weight||0),0))} كغم</div><div style={S.kpiLabel}>إجمالي الصافي</div></div>
+        <div style={S.kpi("#f0b429")}><div style={S.kpiVal}>{fmt(data.purchases.reduce((s,p)=>s+p.total,0))}</div><div style={S.kpiLabel}>إجمالي الكلفة</div></div>
+      </div>
+
+      {/* PHASE 1 */}
+      <div style={{ ...S.card, border: "2px solid #e67e2244", background: "#14100a" }}>
+        <div style={S.cardTitle}>
+          🚛 المرحلة الأولى — وزن الشاحنة محمّلة
+        </div>
+        <div style={{ fontSize: 12, color: "#7a8a9a", marginBottom: 12, background: "#0d1117", borderRadius: 8, padding: "8px 12px" }}>
+          💡 سجّل المجهز وأضفه للطابور ← يذهب للتفريغ ← عند عودته اضغط "رجع" لإدخال وزن الفارغ
+        </div>
+        <div style={S.formGrid}>
+          <div style={S.formField}>
+            <label style={S.label}>التاريخ</label>
+            <input type="date" style={S.input} value={p1.date} onChange={e=>setP1(f=>({...f,date:e.target.value}))} />
+          </div>
+          <div style={S.formField}>
+            <label style={S.label}>اسم المجهز</label>
+            <AutocompleteInput
+              style={{...S.input,borderColor:p1.supplier?"#e67e22":"#2a3545"}}
+              placeholder="مثال: حسن، أحمد..."
+              value={p1.supplier}
+              onChange={v=>setP1(f=>({...f,supplier:v}))}
+              suggestions={[...new Set(data.purchases.map(p=>p.supplier).filter(Boolean))]}
+            />
+          </div>
+          <div style={S.formField}>
+            <label style={S.label}>⚖️ وزن الشاحنة محمّلة (كغم)</label>
+            <input type="number" style={{...S.input,borderColor:"#e67e2266"}} placeholder="مثال: 18500" value={p1.grossWeight} onChange={e=>setP1(f=>({...f,grossWeight:e.target.value}))} />
+            <button type="button" onClick={()=>scaleRead("gross",v=>setP1(f=>({...f,grossWeight:v})))} disabled={simulating==="gross"} style={{marginTop:4,background:simulating==="gross"?"#1a2a1a":"linear-gradient(135deg,#27ae60,#1a7a45)",border:"1px solid #27ae60",borderRadius:6,padding:"5px 12px",color:"#fff",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>
+              {simulating==="gross"?"⏳ قراءة...":"⚖️ قراءة الميزان"}
+            </button>
+          </div>
+          <div style={S.formField}>
+            <label style={S.label}>سعر الكغم (د.ع)</label>
+            <input type="number" style={S.input} placeholder="السعر" value={p1.price} onChange={e=>setP1(f=>({...f,price:e.target.value}))} />
+          </div>
+          <div style={S.formField}>
+            <label style={S.label}>طريقة الدفع</label>
+            <select style={S.select} value={p1.payType} onChange={e=>setP1(f=>({...f,payType:e.target.value}))}>
+              <option value="cash">نقدي</option><option value="deferred">آجل</option>
+            </select>
+          </div>
+          <div style={S.formField}>
+            <label style={S.label}>ملاحظات</label>
+            <input style={S.input} placeholder="اختياري" value={p1.notes} onChange={e=>setP1(f=>({...f,notes:e.target.value}))} />
+          </div>
+        </div>
+        <button style={{...S.btn("#e67e22"),width:"100%",opacity:(!p1.supplier||!p1.grossWeight||!p1.price)?0.4:1}} disabled={isReadOnly} onClick={addToQueue}>
+          🚛 أضف للطابور ← ذهب للتفريغ
+        </button>
+      </div>
+
+      {/* QUEUE */}
+      {pending.length > 0 && (
+        <div style={{...S.card,border:"2px solid #f0b42966",background:"#13120a"}}>
+          <div style={{...S.cardTitle,justifyContent:"space-between"}}>
+            <span>⏳ الطابور — بانتظار وزن العودة</span>
+            <span style={{background:"#f0b42922",border:"1px solid #f0b42966",borderRadius:20,padding:"2px 12px",fontSize:13,color:"#f0b429"}}>{pending.length} 🚛</span>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {pending.map(ticket=>(
+              <div key={ticket.id} style={{background:"#0d1117",border:"1px solid #2a3020",borderRadius:10,padding:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <span style={{fontSize:24}}>🚛</span>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:16,color:"#f0e6c8"}}>{ticket.supplier}</div>
+                      <div style={{fontSize:11,color:"#7a8a9a"}}>صعد الميزان: {ticket.time} • {ticket.date}</div>
+                    </div>
+                  </div>
+                  <div style={{textAlign:"left"}}>
+                    <div style={{fontSize:14,color:"#e67e22",fontWeight:700}}>{fmtNum(ticket.grossWeight)} كغم</div>
+                    <div style={{fontSize:10,color:"#7a8a9a"}}>محمّل</div>
+                  </div>
+                </div>
+
+                {completing===ticket.id ? (
+                  <div style={{background:"#0a1520",borderRadius:8,padding:12,border:"1px solid #1e4a60"}}>
+                    <div style={{fontSize:12,color:"#4a90e2",fontWeight:700,marginBottom:8}}>⚖️ وزن الشاحنة فارغة (تارة)</div>
+                    <div style={{display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap"}}>
+                      <input type="number" style={{...S.input,flex:1,minWidth:120,borderColor:"#4a90e266"}} placeholder="وزن العربة فارغ" value={tareVal} onChange={e=>setTareVal(e.target.value)} />
+                      <button type="button" onClick={()=>scaleRead("tare",v=>setTareVal(v))} disabled={simulating==="tare"} style={{background:simulating==="tare"?"#1a2a1a":"linear-gradient(135deg,#27ae60,#1a7a45)",border:"1px solid #27ae60",borderRadius:6,padding:"10px 14px",color:"#fff",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>
+                        {simulating==="tare"?"⏳":"⚖️ قراءة"}
+                      </button>
+                    </div>
+                    {tareVal && parseFloat(tareVal)<ticket.grossWeight && (
+                      <div style={{marginTop:8,background:"#0d2010",border:"1px solid #4caf5044",borderRadius:8,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                        <span style={{fontSize:12,color:"#7a8a9a"}}>{fmtNum(ticket.grossWeight)} − {fmtNum(parseFloat(tareVal))} =</span>
+                        <span style={{color:"#4caf50",fontWeight:700,fontSize:20}}>{fmtNum(ticket.grossWeight-parseFloat(tareVal))} كغم صافي</span>
+                      </div>
+                    )}
+                    <div style={{display:"flex",gap:8,marginTop:10}}>
+                      <button style={{...S.btn("#27ae60"),flex:1,opacity:(!tareVal||parseFloat(tareVal)>=ticket.grossWeight)?0.4:1}} onClick={()=>completeTicket(ticket)}>✅ إتمام وحفظ الشحنة</button>
+                      <button style={{background:"none",border:"1px solid #4a5a6a",borderRadius:8,padding:"10px 14px",color:"#7a8a9a",cursor:"pointer",fontFamily:"inherit"}} onClick={()=>{setCompleting(null);setTareVal("")}}>إلغاء</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{display:"flex",gap:8}}>
+                    <button style={{...S.btn("#4a90e2"),flex:1}} onClick={()=>{setCompleting(ticket.id);setTareVal("")}}>🔄 رجع — أدخل وزن الفارغ</button>
+                    <button style={S.btnDanger} onClick={()=>{if(window.confirm("حذف من الطابور؟"))removeQueue(ticket.id)}}>🗑</button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* COMPLETED TABLE */}
+      <div style={S.card}>
+        <div style={S.cardTitle}>✅ الشحنات المكتملة</div>
+        {data.purchases.length===0 ? (
+          <div style={S.emptyState}>📦 لا توجد شحنات مكتملة بعد</div>
+        ) : (
+          <table style={S.table}>
+            <thead><tr>
+              <th style={S.th}>التاريخ</th><th style={S.th}>المجهز</th>
+              <th style={S.th}>كلي(كغم)</th><th style={S.th}>فارغ(كغم)</th>
+              <th style={{...S.th,color:"#4caf50"}}>صافي(كغم)</th>
+              <th style={S.th}>سعر/كغم</th><th style={S.th}>الإجمالي</th>
+              <th style={S.th}>الحالة</th><th style={S.th}></th>
+            </tr></thead>
+            <tbody>
+              {[...data.purchases].reverse().map(p=>[
+                <tr key={p.id}>
+                  <td style={S.td}>{p.date}</td>
+                  <td style={S.td}>{p.supplier}</td>
+                  <td style={{...S.td,color:"#e67e22"}}>{fmtNum(p.grossWeight||p.weight)}</td>
+                  <td style={{...S.td,color:"#7a8a9a"}}>{fmtNum(p.tareWeight||0)}</td>
+                  <td style={{...S.td,fontWeight:700,color:"#4caf50"}}>{fmtNum(p.weight||(p.grossWeight-p.tareWeight))}</td>
+                  <td style={S.td}>{fmt(p.price)}</td>
+                  <td style={{...S.td,fontWeight:700,color:"#f0b429"}}>{fmt(p.total)}</td>
+                  <td style={S.td}><span style={S.badge(p.payType==="cash"?"#4caf50":"#e67e22")}>{p.payType==="cash"?"نقدي":"آجل"}</span></td>
+                  <td style={S.td}>
+                    <button style={S.btnDanger} onClick={()=>{if(window.confirm("هل أنت متأكد من حذف هذا السجل؟"))del(p.id)}}>🗑</button>
+                    <button style={{...S.btnDanger, color: "#4a90e2", border: "1px solid #4a90e244"}} onClick={()=>startEdit(p)}>✏️</button>
+                  </td>
+                </tr>,
+                editId === p.id ? (
+                  <tr key={p.id+"_edit"}><td colSpan="9" style={{...S.td, padding: 12, background: "#0a1520", border: "1px solid #1e4a60"}}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+                      <div><label style={{fontSize:10,color:"#7a8a9a"}}>المجهز</label><input style={{...S.input,padding:"6px",fontSize:12}} value={editForm.supplier} onChange={e=>setEditForm(f=>({...f,supplier:e.target.value}))} /></div>
+                      <div><label style={{fontSize:10,color:"#7a8a9a"}}>وزن كلي</label><input type="number" style={{...S.input,padding:"6px",fontSize:12}} value={editForm.grossWeight} onChange={e=>setEditForm(f=>({...f,grossWeight:e.target.value}))} /></div>
+                      <div><label style={{fontSize:10,color:"#7a8a9a"}}>وزن فارغ</label><input type="number" style={{...S.input,padding:"6px",fontSize:12}} value={editForm.tareWeight} onChange={e=>setEditForm(f=>({...f,tareWeight:e.target.value}))} /></div>
+                      <div><label style={{fontSize:10,color:"#7a8a9a"}}>سعر/كغم</label><input type="number" style={{...S.input,padding:"6px",fontSize:12}} value={editForm.price} onChange={e=>setEditForm(f=>({...f,price:e.target.value}))} /></div>
+                      <div style={{display:"flex",alignItems:"flex-end",gap:4}}>
+                        <button style={{...S.btn("#27ae60"),padding:"6px 12px",fontSize:12}} onClick={()=>saveEdit(p.id)}>💾</button>
+                        <button style={{...S.btnDanger,padding:"6px 8px"}} onClick={()=>setEditId(null)}>✕</button>
+                      </div>
+                    </div>
+                  </td></tr>
+                ) : null
+                ])}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ==================== SALES (QUEUE SYSTEM) ====================
+function Sales({ data, save, isReadOnly }) {
+  const [editId, setEditId] = useState(null);
+  const [editForm, setEditForm] = useState({});
+
+  const canEdit = (recordDate) => {
+    if (recordDate === today()) return true;
+    const pw = window.prompt("سجل من يوم سابق — أدخل كلمة مرور المالك:");
+    return pw === (data.settings?.reportPassword || "owner1234");
+  };
+
+  const startEdit = (rec) => {
+    if (!canEdit(rec.date)) return;
+    setEditId(rec.id);
+    setEditForm({ customer: rec.customer, weight: rec.weight, price: rec.price, payType: rec.payType, notes: rec.notes||"" });
+  };
+
+  const saveEdit = (id) => {
+    const w = parseFloat(editForm.weight)||0;
+    const pr = parseFloat(editForm.price)||0;
+    const total = w * pr;
+    save({ ...data, sales: data.sales.map(s => s.id === id ? {
+      ...s, customer: editForm.customer, weight: w, price: pr, payType: editForm.payType, notes: editForm.notes, total
+    } : s) });
+    setEditId(null);
+  };
+
+  const [form, setForm] = useState({ customer: "", estWeight: "", price: "", payType: "cash", date: today(), notes: "" });
+  const [completing, setCompleting] = useState(null);
+  const [actualWeight, setActualWeight] = useState("");
+
+  const pending = data.pendingSales || [];
+
+  // إضافة شحنة للطابور (خروج حمولة للعميل)
+  const addToQueue = () => {
+    if (!form.customer || !form.price) return;
+    const ticket = {
+      id: uid(), customer: form.customer,
+      estWeight: parseFloat(form.estWeight) || 0, price: parseFloat(form.price),
+      payType: form.payType, date: form.date, notes: form.notes,
+      time: new Date().toLocaleTimeString("ar-IQ", { hour: "2-digit", minute: "2-digit" }),
+    };
+    save({ ...data, pendingSales: [...pending, ticket] });
+    setForm(f => ({ ...f, customer: "", estWeight: "", notes: "" }));
+  };
+
+  // إتمام البيع بعد تأكيد الوزن من العميل
+  const completeTicket = (ticket) => {
+    const w = parseFloat(actualWeight);
+    if (!w || w <= 0) return;
+    const total = w * ticket.price;
+    const rec = {
+      id: uid(), customer: ticket.customer, estWeight: ticket.estWeight,
+      weight: w, price: ticket.price, payType: ticket.payType,
+      date: ticket.date, notes: ticket.notes, total,
+    };
+    const newPending = pending.filter(p => p.id !== ticket.id);
+    const newData = { ...data, sales: [...data.sales, rec], pendingSales: newPending };
+    // إنشاء دين تلقائي إذا آجل
+    if (ticket.payType === "deferred") {
+      newData.debts = [...(data.debts || []), {
+        id: uid(), type: "customer", name: ticket.customer,
+        amount: total, date: ticket.date,
+        notes: `بيع ${w} طن`, status: "pending", payments: [],
+      }];
+    }
+    save(newData);
+    setCompleting(null);
+    setActualWeight("");
+  };
+
+  // حذف من الطابور
+  const removeQueue = (id) => {
+    save({ ...data, pendingSales: pending.filter(p => p.id !== id) });
+  };
+
+  // حذف من المكتملات
+  const del = (id) => {
+    save({ ...data, sales: data.sales.filter(s => s.id !== id) });
+  };
+
+  return (
+    <>
+      <h2 style={{ color: "#f0b429", fontSize: 18, marginBottom: 16 }}>💰 المبيعات</h2>
+
+      {/* KPIs */}
+      <div style={{ ...S.kpiGrid, gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 16 }}>
+        <div style={S.kpi("#27ae60")}>
+          <div style={S.kpiVal}>{data.sales.length}</div>
+          <div style={S.kpiLabel}>صفقات مكتملة</div>
+        </div>
+        <div style={S.kpi("#e67e22")}>
+          <div style={S.kpiVal}>{pending.length}</div>
+          <div style={S.kpiLabel}>بانتظار التأكيد</div>
+        </div>
+        <div style={S.kpi("#1abc9c")}>
+          <div style={S.kpiVal}>{fmtNum(data.sales.reduce((s, p) => s + p.weight, 0))} طن</div>
+          <div style={S.kpiLabel}>إجمالي الوزن</div>
+        </div>
+        <div style={S.kpi("#27ae60")}>
+          <div style={S.kpiVal}>{fmt(data.sales.reduce((s, p) => s + p.total, 0))}</div>
+          <div style={S.kpiLabel}>إجمالي الإيرادات</div>
+        </div>
+      </div>
+
+      {/* FORM — تسجيل شحنة خارجة */}
+      <div style={{ ...S.card, border: "2px solid #27ae6044" }}>
+        <div style={S.cardTitle}>🚛 تسجيل شحنة خارجة (حمولة للعميل)</div>
+        <div style={S.formGrid}>
+          <div style={S.formField}>
+            <label style={S.label}>التاريخ</label>
+            <input type="date" style={S.input} value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} />
+          </div>
+          <div style={S.formField}>
+            <label style={S.label}>اسم العميل (الزبون)</label>
+            <AutocompleteInput
+              style={{ ...S.input, borderColor: form.customer ? "#27ae60" : "#2a3545" }}
+              placeholder="مثال: شركة النور، مصنع الحديد..."
+              value={form.customer}
+              onChange={v => setForm(f => ({ ...f, customer: v }))}
+              suggestions={[...new Set(data.sales.map(s => s.customer).filter(Boolean))]}
+            />
+          </div>
+          <div style={S.formField}>
+            <label style={S.label}>الوزن التقديري (طن) — اختياري</label>
+            <input type="number" style={{ ...S.input, borderColor: "#2a3545" }} placeholder="مثال: 20 (تقريبي)" value={form.estWeight} onChange={e => setForm(f => ({ ...f, estWeight: e.target.value }))} />
+            <div style={{ fontSize: 10, color: "#4a5a6a", marginTop: 2 }}>الوزن الفعلي يُدخل لمّا العميل يأكد</div>
+          </div>
+          <div style={S.formField}>
+            <label style={S.label}>سعر الطن (د.ع)</label>
+            <input type="number" style={S.input} placeholder="السعر المتفق" value={form.price} onChange={e => setForm(f => ({ ...f, price: e.target.value }))} />
+          </div>
+          <div style={S.formField}>
+            <label style={S.label}>طريقة الدفع</label>
+            <select style={S.select} value={form.payType} onChange={e => setForm(f => ({ ...f, payType: e.target.value }))}>
+              <option value="cash">نقدي</option><option value="deferred">آجل</option>
+            </select>
+          </div>
+          <div style={S.formField}>
+            <label style={S.label}>ملاحظات</label>
+            <input style={S.input} placeholder="رقم التريلة، نوع الكارتون..." value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
+          </div>
+        </div>
+        <button style={{ ...S.btn("#27ae60"), width: "100%", opacity: (!form.customer || !form.price) ? 0.4 : 1 }} disabled={isReadOnly} onClick={addToQueue}>
+          🚛 تسجيل الشحنة ← بانتظار تأكيد الوزن من العميل
+        </button>
+      </div>
+
+      {/* QUEUE — بانتظار تأكيد الوزن */}
+      {pending.length > 0 && (
+        <div style={{ ...S.card, border: "2px solid #f0b42966", background: "#13120a" }}>
+          <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
+            <span>⏳ بانتظار تأكيد الوزن من العميل</span>
+            <span style={{ background: "#f0b42922", border: "1px solid #f0b42966", borderRadius: 20, padding: "2px 12px", fontSize: 13, color: "#f0b429" }}>{pending.length} 📦</span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {pending.map(ticket => (
+              <div key={ticket.id} style={{ background: "#0d1117", border: "1px solid #1e3020", borderRadius: 10, padding: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 24 }}>📦</span>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: 16, color: "#f0e6c8" }}>{ticket.customer}</div>
+                      <div style={{ fontSize: 11, color: "#7a8a9a" }}>خرجت: {ticket.time} • {ticket.date}</div>
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "left" }}>
+                    {ticket.estWeight > 0 && <div style={{ fontSize: 14, color: "#e67e22", fontWeight: 700 }}>~{fmtNum(ticket.estWeight)} طن</div>}
+                    <div style={{ fontSize: 10, color: "#7a8a9a" }}>سعر/طن: {fmt(ticket.price)}</div>
+                    <div style={{ fontSize: 10, color: ticket.payType === "cash" ? "#4caf50" : "#e67e22" }}>{ticket.payType === "cash" ? "نقدي" : "آجل"}</div>
+                  </div>
+                </div>
+
+                {ticket.notes && <div style={{ fontSize: 11, color: "#5a6a7a", marginBottom: 8, padding: "4px 8px", background: "#0a0e15", borderRadius: 6 }}>📝 {ticket.notes}</div>}
+
+                {completing === ticket.id ? (
+                  <div style={{ background: "#0a1520", borderRadius: 8, padding: 12, border: "1px solid #1e4a60" }}>
+                    <div style={{ fontSize: 12, color: "#27ae60", fontWeight: 700, marginBottom: 8 }}>⚖️ الوزن الفعلي من العميل (طن)</div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+                      <input type="number" style={{ ...S.input, flex: 1, minWidth: 120, borderColor: "#27ae6066" }} placeholder="الوزن الفعلي بالطن" value={actualWeight} onChange={e => setActualWeight(e.target.value)} />
+                    </div>
+                    {actualWeight && parseFloat(actualWeight) > 0 && (
+                      <div style={{ marginTop: 8, background: "#0d2010", border: "1px solid #4caf5044", borderRadius: 8, padding: "8px 12px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                          <span style={{ fontSize: 12, color: "#7a8a9a" }}>الوزن الفعلي:</span>
+                          <span style={{ color: "#4caf50", fontWeight: 700, fontSize: 18 }}>{fmtNum(parseFloat(actualWeight))} طن</span>
+                        </div>
+                        {ticket.estWeight > 0 && (
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#7a8a9a" }}>
+                            <span>الفرق عن التقديري:</span>
+                            <span style={{ color: parseFloat(actualWeight) >= ticket.estWeight ? "#4caf50" : "#e55444" }}>
+                              {parseFloat(actualWeight) >= ticket.estWeight ? "+" : ""}{fmtNum(parseFloat(actualWeight) - ticket.estWeight)} طن
+                            </span>
+                          </div>
+                        )}
+                        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, paddingTop: 6, borderTop: "1px solid #1e3020" }}>
+                          <span style={{ fontSize: 13, color: "#7a8a9a" }}>المبلغ الإجمالي:</span>
+                          <span style={{ color: "#f0b429", fontWeight: 700, fontSize: 20 }}>{fmt(parseFloat(actualWeight) * ticket.price)}</span>
+                        </div>
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                      <button style={{ ...S.btn("#27ae60"), flex: 1, opacity: (!actualWeight || parseFloat(actualWeight) <= 0) ? 0.4 : 1 }} onClick={() => completeTicket(ticket)}>✅ تأكيد وإتمام البيع</button>
+                      <button style={{ background: "none", border: "1px solid #4a5a6a", borderRadius: 8, padding: "10px 14px", color: "#7a8a9a", cursor: "pointer", fontFamily: "inherit" }} onClick={() => { setCompleting(null); setActualWeight(""); }}>إلغاء</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button style={{ ...S.btn("#4a90e2"), flex: 1 }} onClick={() => { setCompleting(ticket.id); setActualWeight(""); }}>📱 وصل تأكيد الوزن — أدخل الوزن الفعلي</button>
+                    <button style={S.btnDanger} onClick={() => {if(window.confirm("حذف من الطابور؟"))removeQueue(ticket.id)}}>🗑</button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* COMPLETED TABLE */}
+      <div style={S.card}>
+        <div style={S.cardTitle}>✅ المبيعات المكتملة</div>
+        {data.sales.length === 0 ? (
+          <div style={S.emptyState}>💰 لا توجد مبيعات مكتملة بعد</div>
+        ) : (
+          <table style={S.table}>
+            <thead><tr>
+              <th style={S.th}>التاريخ</th>
+              <th style={S.th}>الزبون</th>
+              <th style={{ ...S.th, color: "#7a8a9a" }}>تقديري</th>
+              <th style={{ ...S.th, color: "#4caf50" }}>فعلي(طن)</th>
+              <th style={S.th}>سعر/طن</th>
+              <th style={S.th}>الإجمالي</th>
+              <th style={S.th}>الدفع</th>
+              <th style={S.th}></th>
+            </tr></thead>
+            <tbody>
+              {[...data.sales].reverse().map(s => [
+                <tr key={s.id}>
+                  <td style={S.td}>{s.date}</td>
+                  <td style={S.td}>{s.customer}</td>
+                  <td style={{ ...S.td, color: "#5a6a7a", fontSize: 11 }}>{s.estWeight ? fmtNum(s.estWeight) : "—"}</td>
+                  <td style={{ ...S.td, fontWeight: 700, color: "#4caf50" }}>{fmtNum(s.weight)}</td>
+                  <td style={S.td}>{fmt(s.price)}</td>
+                  <td style={{ ...S.td, fontWeight: 700, color: "#f0b429" }}>{fmt(s.total)}</td>
+                  <td style={S.td}><span style={S.badge(s.payType === "cash" ? "#4caf50" : "#e67e22")}>{s.payType === "cash" ? "نقدي" : "آجل"}</span></td>
+                  <td style={S.td}><button style={S.btnDanger} onClick={() => {if(window.confirm("هل أنت متأكد من حذف هذا السجل؟"))del(s.id)}}>🗑</button>
+                    <button style={{...S.btnDanger, color: "#4a90e2", border: "1px solid #4a90e244"}} onClick={()=>startEdit(s)}>✏️</button>
+                  </td>
+                </tr>,
+                editId === s.id ? (
+                  <tr key={s.id+"_edit"}><td colSpan="8" style={{...S.td, padding: 12, background: "#0a1520", border: "1px solid #1e4a60"}}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+                      <div><label style={{fontSize:10,color:"#7a8a9a"}}>الزبون</label><input style={{...S.input,padding:"6px",fontSize:12}} value={editForm.customer} onChange={e=>setEditForm(f=>({...f,customer:e.target.value}))} /></div>
+                      <div><label style={{fontSize:10,color:"#7a8a9a"}}>الوزن (طن)</label><input type="number" style={{...S.input,padding:"6px",fontSize:12}} value={editForm.weight} onChange={e=>setEditForm(f=>({...f,weight:e.target.value}))} /></div>
+                      <div><label style={{fontSize:10,color:"#7a8a9a"}}>سعر/طن</label><input type="number" style={{...S.input,padding:"6px",fontSize:12}} value={editForm.price} onChange={e=>setEditForm(f=>({...f,price:e.target.value}))} /></div>
+                      <div style={{display:"flex",alignItems:"flex-end",gap:4}}>
+                        <button style={{...S.btn("#27ae60"),padding:"6px 12px",fontSize:12}} onClick={()=>saveEdit(s.id)}>💾 حفظ</button>
+                        <button style={{...S.btnDanger,padding:"6px 8px"}} onClick={()=>setEditId(null)}>✕</button>
+                      </div>
+                    </div>
+                  </td></tr>
+                ) : null
+              ])}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ==================== MACHINERY ====================
+function Machinery({ data, save, isReadOnly }) {
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({
+    date: today(),
+    machine: "مولدة",
+    expType: "fuel",
+    amount: "",
+    notes: "",
+  });
+
+  const add = () => {
+    if (!form.amount || isReadOnly) return;
+    const rec = { id: uid(), ...form, amount: parseFloat(form.amount) };
+    save({ ...data, machinery: [...data.machinery, rec] });
+    setForm({ date: today(), machine: "مولدة", expType: "fuel", amount: "", notes: "" });
+    setShowForm(false);
+  };
+
+  const del = (id) => {
+    save({ ...data, machinery: data.machinery.filter((m) => m.id !== id) });
+  };
+
+  const machines = ["مولدة", "شفل", "كابسة", "رافعة"];
+  const machineIcons = { "مولدة": "⚡", "شفل": "🚜", "كابسة": "🏗", "رافعة": "🏋️" };
+  const expTypeLabel = (t) => t === "fuel" ? "⛽ وقود" : t === "oil" ? "🛢️ زيت" : "🔧 صيانة";
+  const expTypeColor = (t) => t === "fuel" ? "#e67e22" : t === "oil" ? "#8e44ad" : "#4a90e2";
+
+  const byMachine = machines.map((m) => ({
+    name: m,
+    fuel: data.machinery.filter((x) => x.machine === m && x.expType === "fuel").reduce((s, x) => s + x.amount, 0),
+    oil: data.machinery.filter((x) => x.machine === m && x.expType === "oil").reduce((s, x) => s + x.amount, 0),
+    maintenance: data.machinery.filter((x) => x.machine === m && x.expType === "maintenance").reduce((s, x) => s + x.amount, 0),
+  }));
+
+  return (
+    <>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ color: "#f0b429", margin: 0, fontSize: 18 }}>⚙️ الآليات والمعدات</h2>
+        <button style={S.btn("#9b59b6")} onClick={() => setShowForm(true)}>
+          <Icon name="add" size={14} /> إضافة مصرف
+        </button>
+      </div>
+
+      {/* By Machine Summary — 4 columns */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginBottom: 16 }}>
+        {byMachine.map((m) => (
+          <div key={m.name} style={S.kpi("#9b59b6")}>
+            <div style={{ fontSize: 18, marginBottom: 4 }}>{machineIcons[m.name]}</div>
+            <div style={{ fontSize: 12, color: "#c8b0e8", fontWeight: 700 }}>{m.name}</div>
+            <div style={{ fontSize: 10, color: "#e67e22", marginTop: 4 }}>⛽ {fmt(m.fuel)}</div>
+            <div style={{ fontSize: 10, color: "#8e44ad" }}>🛢️ {fmt(m.oil)}</div>
+            <div style={{ fontSize: 10, color: "#4a90e2" }}>🔧 {fmt(m.maintenance)}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={S.card}>
+        {data.machinery.length === 0 ? (
+          <div style={S.emptyState}>⚙️ لا توجد مصاريف مسجلة للآليات</div>
+        ) : (
+          <table style={S.table}>
+            <thead>
+              <tr>
+                <th style={S.th}>التاريخ</th>
+                <th style={S.th}>الآلية</th>
+                <th style={S.th}>نوع المصرف</th>
+                <th style={S.th}>المبلغ</th>
+                <th style={S.th}>ملاحظات</th>
+                <th style={S.th}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...data.machinery].reverse().map((m) => (
+                <tr key={m.id}>
+                  <td style={S.td}>{m.date}</td>
+                  <td style={S.td}>{m.machine}</td>
+                  <td style={S.td}>
+                    <span style={S.badge(expTypeColor(m.expType))}>
+                      {expTypeLabel(m.expType)}
+                    </span>
+                  </td>
+                  <td style={{ ...S.td, color: "#e55444", fontWeight: 700 }}>
+                    {fmt(m.amount)}
+                  </td>
+                  <td style={{ ...S.td, color: "#7a8a9a" }}>{m.notes}</td>
+                  <td style={S.td}>
+                    <button style={S.btnDanger} onClick={() => del(m.id)}>
+                      🗑
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {showForm && (
+        <Modal title="تسجيل مصرف آلية" onClose={() => setShowForm(false)}>
+          <div style={S.formGrid}>
+            <div style={S.formField}>
+              <label style={S.label}>التاريخ</label>
+              <input
+                type="date"
+                style={S.input}
+                value={form.date}
+                onChange={(e) => setForm({ ...form, date: e.target.value })}
+              />
+            </div>
+            <div style={S.formField}>
+              <label style={S.label}>الآلية</label>
+              <select
+                style={S.select}
+                value={form.machine}
+                onChange={(e) => setForm({ ...form, machine: e.target.value })}
+              >
+                <option>مولدة</option>
+                <option>شفل</option>
+                <option>كابسة</option>
+                <option>رافعة</option>
+              </select>
+            </div>
+            <div style={S.formField}>
+              <label style={S.label}>نوع المصرف</label>
+              <select
+                style={S.select}
+                value={form.expType}
+                onChange={(e) => setForm({ ...form, expType: e.target.value })}
+              >
+                <option value="fuel">⛽ وقود</option>
+                <option value="oil">🛢️ زيت</option>
+                <option value="maintenance">🔧 صيانة</option>
+              </select>
+            </div>
+            <div style={S.formField}>
+              <label style={S.label}>المبلغ (د.ع)</label>
+              <input
+                type="number"
+                style={S.input}
+                placeholder="المبلغ بالدينار"
+                value={form.amount}
+                onChange={(e) => setForm({ ...form, amount: e.target.value })}
+              />
+            </div>
+          </div>
+          <div style={{ ...S.formField, marginBottom: 16 }}>
+            <label style={S.label}>ملاحظات</label>
+            <input
+              style={S.input}
+              placeholder="تفاصيل إضافية"
+              value={form.notes}
+              onChange={(e) => setForm({ ...form, notes: e.target.value })}
+            />
+          </div>
+          <button
+            style={{ ...S.btn("#9b59b6"), width: "100%" }}
+            onClick={add}
+          >
+            💾 حفظ المصرف
+          </button>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+// ==================== WORKERS ====================
+function Workers({ data, save, isReadOnly }) {
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ name: "", role: "", wageType: "daily", wage: "", extraPay: "", advance: "", notes: "" });
+  const [editing, setEditing] = useState(null);
+
+  const add = () => {
+    if (!form.name || !form.wage) return;
+    save({ ...data, workers: [...data.workers, {
+      id: uid(), ...form, wage: parseFloat(form.wage)||0, extraPay: parseFloat(form.extraPay)||0, advance: parseFloat(form.advance)||0,
+    }] });
+    setForm({ name: "", role: "", wageType: "daily", wage: "", extraPay: "", advance: "", notes: "" });
+    setShowForm(false);
+  };
+
+  const del = (id) => {
+    if (!window.confirm("هل أنت متأكد من حذف هذا الموظف؟")) return;
+    save({ ...data, workers: data.workers.filter(w => w.id !== id) });
+  };
+
+  const resetWorker = (id) => {
+    if (!window.confirm("تصفير سلف وأجور إضافية؟ (بعد دفع الراتب)")) return;
+    save({ ...data, workers: data.workers.map(w => w.id === id ? { ...w, extraPay: 0, advance: 0 } : w) });
+  };
+
+  const quickUpdate = (id, field, value) => {
+    save({ ...data, workers: data.workers.map(w => w.id === id ? { ...w, [field]: parseFloat(value)||0 } : w) });
+  };
+
+  const calcNet = (w) => (w.wage||0) + (w.extraPay||0) - (w.advance||0);
+  const totalPayroll = data.workers.reduce((s, w) => s + calcNet(w), 0);
+
+  return (
+    <>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ color: "#f0b429", margin: 0, fontSize: 18 }}>👷 الموظفون والرواتب</h2>
+        <button onClick={() => !isReadOnly && setShowForm(true)} disabled={isReadOnly} style={{...S.btn("#4a90e2"), opacity: isReadOnly?0.3:1}}>
+          <Icon name="add" size={14} /> إضافة موظف
+        </button>
+      </div>
+
+      <div style={{ ...S.kpiGrid, gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 16 }}>
+        <div style={S.kpi("#1abc9c")}><div style={S.kpiVal}>{data.workers.length}</div><div style={S.kpiLabel}>عدد العمال</div></div>
+        <div style={S.kpi("#e55444")}><div style={S.kpiVal}>{fmt(data.workers.reduce((s,w) => s+(w.advance||0), 0))}</div><div style={S.kpiLabel}>إجمالي السلف</div></div>
+        <div style={S.kpi("#1abc9c")}><div style={S.kpiVal}>{fmt(totalPayroll)}</div><div style={S.kpiLabel}>صافي الرواتب</div></div>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {data.workers.length === 0 ? (
+          <div style={{ ...S.card, ...S.emptyState }}>👷 لا توجد بيانات موظفين</div>
+        ) : data.workers.map(w => {
+          const net = calcNet(w);
+          const isEditing = editing === w.id;
+          return (
+            <div key={w.id} style={{ ...S.card, padding: 14, marginBottom: 0 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 22 }}>👷</span>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 15, color: "#f0e6c8" }}>{w.name}</div>
+                    <div style={{ fontSize: 11, color: "#7a8a9a" }}>{w.role || "عامل"} • <span style={{ color: w.wageType === "monthly" ? "#4a90e2" : "#1abc9c" }}>{w.wageType === "monthly" ? "شهري" : "يومي"}</span></div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 4 }}>
+                  <button title="تعديل سريع" style={{ background: "none", border: "1px solid #4a90e244", borderRadius: 6, padding: "4px 8px", color: "#4a90e2", cursor: "pointer", fontSize: 12 }}
+                    onClick={() => setEditing(isEditing ? null : w.id)}>✏️</button>
+                  <button title="تصفير" style={{ ...S.btnDanger, background: "#0d2b1a", border: "1px solid #1abc9c66", color: "#1abc9c", fontSize: 14 }}
+                    onClick={() => resetWorker(w.id)}>↺</button>
+                  <button style={S.btnDanger} onClick={() => del(w.id)}>🗑</button>
+                </div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
+                <div style={{ background: "#0d1117", borderRadius: 6, padding: "6px 8px", textAlign: "center" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1abc9c" }}>{fmt(w.wage)}</div>
+                  <div style={{ fontSize: 9, color: "#5a6a7a" }}>الأجر</div>
+                </div>
+                <div style={{ background: (w.extraPay||0) > 0 ? "#1a1a0a" : "#0d1117", border: (w.extraPay||0) > 0 ? "1px solid #f0b42944" : "none", borderRadius: 6, padding: "6px 8px", textAlign: "center" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#f0b429" }}>{(w.extraPay||0) > 0 ? fmt(w.extraPay) : "—"}</div>
+                  <div style={{ fontSize: 9, color: "#5a6a7a" }}>أجور إضافية</div>
+                </div>
+                <div style={{ background: "#0d1117", borderRadius: 6, padding: "6px 8px", textAlign: "center" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#e55444" }}>{(w.advance||0) > 0 ? fmt(w.advance) : "—"}</div>
+                  <div style={{ fontSize: 9, color: "#5a6a7a" }}>سلفة</div>
+                </div>
+                <div style={{ background: "#0a1510", border: "1px solid #1abc9c44", borderRadius: 6, padding: "6px 8px", textAlign: "center" }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: net >= 0 ? "#1abc9c" : "#e55444" }}>{fmt(net)}</div>
+                  <div style={{ fontSize: 9, color: "#5a6a7a" }}>الصافي</div>
+                </div>
+              </div>
+              {isEditing && (
+                <div style={{ background: "#0a1520", borderRadius: 8, padding: 10, border: "1px solid #1e4a60", display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                  <div>
+                    <label style={{ fontSize: 10, color: "#1abc9c", display: "block" }}>الأجر</label>
+                    <input type="number" style={{ ...S.input, padding: "6px 8px", fontSize: 13 }} value={w.wage||""} onChange={e => quickUpdate(w.id, "wage", e.target.value)} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 10, color: "#f0b429", display: "block" }}>أجور إضافية</label>
+                    <input type="number" style={{ ...S.input, padding: "6px 8px", fontSize: 13, borderColor: "#f0b42944" }} placeholder="أوفر تايم" value={w.extraPay||""} onChange={e => quickUpdate(w.id, "extraPay", e.target.value)} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 10, color: "#e55444", display: "block" }}>سلفة</label>
+                    <input type="number" style={{ ...S.input, padding: "6px 8px", fontSize: 13 }} value={w.advance||""} onChange={e => quickUpdate(w.id, "advance", e.target.value)} />
+                  </div>
+                </div>
+              )}
+              {w.notes && <div style={{ fontSize: 10, color: "#5a6a7a", marginTop: 4 }}>📝 {w.notes}</div>}
+            </div>
+          );
+        })}
+      </div>
+
+      {showForm && (
+        <Modal title="إضافة موظف جديد" onClose={() => setShowForm(false)}>
+          <div style={S.formGrid}>
+            <div style={S.formField}><label style={S.label}>اسم الموظف</label>
+              <AutocompleteInput style={S.input} placeholder="اسم الموظف" value={form.name} onChange={v => setForm({...form, name: v})} suggestions={[...new Set(data.workers.map(w=>w.name).filter(Boolean))]} /></div>
+            <div style={S.formField}><label style={S.label}>الوظيفة</label>
+              <input style={S.input} placeholder="عامل كبس، سائق..." value={form.role} onChange={e => setForm({...form, role: e.target.value})} /></div>
+            <div style={S.formField}><label style={S.label}>الأجر (د.ع)</label>
+              <input type="number" style={S.input} placeholder="المبلغ" value={form.wage} onChange={e => setForm({...form, wage: e.target.value})} /></div>
+            <div style={S.formField}><label style={S.label}>أجور إضافية (أوفر تايم)</label>
+              <input type="number" style={S.input} placeholder="0" value={form.extraPay} onChange={e => setForm({...form, extraPay: e.target.value})} />
+              <div style={{ fontSize: 10, color: "#4a5a6a", marginTop: 2 }}>مبلغ ثابت عن أعمال إضافية</div></div>
+            <div style={S.formField}><label style={S.label}>سلفة (د.ع)</label>
+              <input type="number" style={S.input} placeholder="0" value={form.advance} onChange={e => setForm({...form, advance: e.target.value})} /></div>
+            <div style={S.formField}><label style={S.label}>ملاحظات</label>
+              <input style={S.input} placeholder="ملاحظات اختيارية" value={form.notes} onChange={e => setForm({...form, notes: e.target.value})} /></div>
+          </div>
+          <button style={{ ...S.btn("#1abc9c"), width: "100%" }} onClick={add}>💾 حفظ بيانات الموظف</button>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+// ==================== DEBT CARD (extracted to prevent remount) ====================
+function DebtCard({ d, color, payingId, payAmount, payNote, setPayingId, setPayAmount, setPayNote, addPayment, del, fmt, fmtNum }) {
+  const paid = (d.payments || []).reduce((s, p) => s + p.amount, 0);
+  const remaining = d.amount - paid;
+  const pct = d.amount > 0 ? (paid / d.amount) * 100 : 0;
+  const statusColor = d.status === "paid" ? "#4caf50" : d.status === "partial" ? "#f0b429" : "#e67e22";
+  const statusLabel = d.status === "paid" ? "✅ مسدد بالكامل" : d.status === "partial" ? "🔶 مسدد جزئياً" : "⏳ معلق";
+  const isPayingThis = payingId === d.id;
+
+  return (
+    <div style={{ background: "#0d1117", border: `1px solid ${statusColor}33`, borderRadius: 10, padding: 12, opacity: d.status === "paid" ? 0.65 : 1, marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 15, color: "#e8e0d5" }}>{d.name}</div>
+          <div style={{ fontSize: 11, color: "#7a8a9a" }}>{d.date}{d.notes ? ` — ${d.notes}` : ""}</div>
+        </div>
+        <span style={{ background: statusColor + "22", color: statusColor, borderRadius: 12, padding: "2px 8px", fontSize: 10, fontWeight: 700 }}>{statusLabel}</span>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <div style={{ background: "#161b25", borderRadius: 6, padding: "6px 8px", textAlign: "center" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color }}>{fmt(d.amount)}</div>
+          <div style={{ fontSize: 10, color: "#7a8a9a" }}>المبلغ الأصلي</div>
+        </div>
+        <div style={{ background: "#161b25", borderRadius: 6, padding: "6px 8px", textAlign: "center" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#4caf50" }}>{fmt(paid)}</div>
+          <div style={{ fontSize: 10, color: "#7a8a9a" }}>المسدد</div>
+        </div>
+        <div style={{ background: remaining > 0 ? "#1a0d0d" : "#0d1a0d", borderRadius: 6, padding: "6px 8px", textAlign: "center" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: remaining > 0 ? "#e55444" : "#4caf50" }}>{fmt(remaining)}</div>
+          <div style={{ fontSize: 10, color: "#7a8a9a" }}>المتبقي</div>
+        </div>
+      </div>
+
+      {d.amount > 0 && (
+        <div style={{ height: 6, background: "#0a0d10", borderRadius: 4, overflow: "hidden", marginBottom: 8 }}>
+          <div style={{ height: "100%", width: `${Math.min(100, pct)}%`, background: "linear-gradient(90deg, #4caf50, #27ae60)", borderRadius: 4 }} />
+        </div>
+      )}
+
+      {(d.payments || []).length > 0 && (
+        <div style={{ background: "#0a0e15", borderRadius: 6, padding: "6px 8px", marginBottom: 8 }}>
+          <div style={{ fontSize: 10, color: "#7a8a9a", marginBottom: 4 }}>سجل التسديدات:</div>
+          {d.payments.map((p, i) => (
+            <div key={p.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "2px 0", borderBottom: i < d.payments.length - 1 ? "1px solid #1e2530" : "none" }}>
+              <span style={{ color: "#c8d0da" }}>{p.date}{p.note ? ` — ${p.note}` : ""}</span>
+              <span style={{ color: "#4caf50", fontWeight: 700 }}>{fmt(p.amount)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {d.status !== "paid" && (
+        isPayingThis ? (
+          <div style={{ background: "#0a1520", borderRadius: 8, padding: 10, border: "1px solid #4a90e244" }}>
+            <div style={{ fontSize: 12, color: "#4a90e2", fontWeight: 700, marginBottom: 8 }}>
+              تسجيل دفعة — المتبقي: {fmt(remaining)}
+            </div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <input
+                type="number"
+                style={{ background: "#0d1117", border: "1px solid #2a3545", borderRadius: 8, padding: "8px 10px", color: "#e8e0d5", fontFamily: "inherit", fontSize: 14, flex: 2, outline: "none" }}
+                placeholder={`المبلغ (أقصى: ${Math.round(remaining)})`}
+                value={payAmount}
+                onChange={e => setPayAmount(e.target.value)}
+                autoFocus
+              />
+              <input
+                style={{ background: "#0d1117", border: "1px solid #2a3545", borderRadius: 8, padding: "8px 10px", color: "#e8e0d5", fontFamily: "inherit", fontSize: 14, flex: 3, outline: "none" }}
+                placeholder="ملاحظة (اختياري)"
+                value={payNote}
+                onChange={e => setPayNote(e.target.value)}
+              />
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                style={{ flex: 1, background: "#27ae60", border: "none", borderRadius: 8, padding: "10px", color: "#fff", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700, opacity: !payAmount ? 0.4 : 1 }}
+                onClick={() => addPayment(d.id)}
+              >
+                ✅ حفظ الدفعة
+              </button>
+              <button
+                style={{ background: "none", border: "1px solid #4a5a6a", borderRadius: 8, padding: "10px 14px", color: "#7a8a9a", cursor: "pointer", fontFamily: "inherit" }}
+                onClick={() => { setPayingId(null); setPayAmount(""); setPayNote(""); }}
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              style={{ flex: 1, background: "#1a1200", border: "1px solid #f0b42966", borderRadius: 8, padding: "8px", color: "#f0b429", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700 }}
+              onClick={() => { setPayingId(d.id); setPayAmount(""); setPayNote(""); }}
+            >
+              💳 تسديد دفعة
+            </button>
+            <button
+              style={{ background: "#1a0808", border: "1px solid #e5544466", borderRadius: 8, padding: "8px 10px", color: "#e55444", cursor: "pointer", fontFamily: "inherit" }}
+              onClick={() => del(d.id)}
+            >
+              🗑
+            </button>
+          </div>
+        )
+      )}
+      {d.status === "paid" && (
+        <button style={{ width: "100%", textAlign: "center", background: "#1a0808", border: "1px solid #e5544466", borderRadius: 8, padding: "6px", color: "#e55444", cursor: "pointer", fontFamily: "inherit", fontSize: 12 }} onClick={() => del(d.id)}>🗑 حذف</button>
+      )}
+    </div>
+  );
+}
+
+// ==================== DEBTS ====================
+function Debts({ data, save, isReadOnly }) {
+  const [showForm, setShowForm] = useState(false);
+  const [payingId, setPayingId] = useState(null);
+  const [payAmount, setPayAmount] = useState("");
+  const [payNote, setPayNote] = useState("");
+  const [form, setForm] = useState({ date: today(), type: "customer", name: "", amount: "", notes: "" });
+
+  const add = () => {
+    if (!form.name || !form.amount) return;
+    const rec = { id: uid(), ...form, amount: parseFloat(form.amount), status: "pending", payments: [] };
+    save({ ...data, debts: [...data.debts, rec] });
+    setForm({ date: today(), type: "customer", name: "", amount: "", notes: "" });
+    setShowForm(false);
+  };
+
+  const addPayment = (id) => {
+    const amount = parseFloat(payAmount);
+    if (!amount || amount <= 0) return;
+    const debt = data.debts.find(d => d.id === id);
+    if (!debt) return;
+    const paid = (debt.payments || []).reduce((s, p) => s + p.amount, 0);
+    const remaining = debt.amount - paid;
+    const actualPay = Math.min(amount, remaining);
+    const newPayments = [...(debt.payments || []), { id: uid(), amount: actualPay, date: today(), note: payNote }];
+    const newPaid = paid + actualPay;
+    const status = newPaid >= debt.amount ? "paid" : "partial";
+    save({ ...data, debts: data.debts.map(d => d.id === id ? { ...d, payments: newPayments, status } : d) });
+    setPayingId(null); setPayAmount(""); setPayNote("");
+  };
+
+  const del = (id) => save({ ...data, debts: data.debts.filter(d => d.id !== id) });
+
+  const getRemaining = (d) => d.amount - (d.payments || []).reduce((s, p) => s + p.amount, 0);
+  const getPaid = (d) => (d.payments || []).reduce((s, p) => s + p.amount, 0);
+
+  const customerDebts = data.debts.filter(d => d.type === "customer");
+  const supplierDebts = data.debts.filter(d => d.type === "supplier");
+  const pendingCustomer = customerDebts.filter(d => d.status !== "paid").reduce((s, d) => s + getRemaining(d), 0);
+  const pendingSupplier = supplierDebts.filter(d => d.status !== "paid").reduce((s, d) => s + getRemaining(d), 0);
+
+  const renderDebtList = (debts, color) => debts.map(d => (
+    <DebtCard
+      key={d.id}
+      d={d}
+      color={color}
+      payingId={payingId}
+      payAmount={payAmount}
+      payNote={payNote}
+      setPayingId={setPayingId}
+      setPayAmount={setPayAmount}
+      setPayNote={setPayNote}
+      addPayment={addPayment}
+      del={del}
+      fmt={fmt}
+      fmtNum={fmtNum}
+    />
+  ));
+
+  return (
+    <>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ color: "#f0b429", margin: 0, fontSize: 18 }}>📋 متابعة الديون</h2>
+        <button onClick={() => !isReadOnly && setShowForm(true)} disabled={isReadOnly} style={{...S.btn("#e67e22"), opacity: isReadOnly?0.3:1}}>
+          <Icon name="add" size={14} /> إضافة دين
+        </button>
+      </div>
+
+      <div style={{ ...S.kpiGrid, gridTemplateColumns: "repeat(2,1fr)", marginBottom: 16 }}>
+        <div style={S.kpi("#27ae60")}>
+          <div style={S.kpiVal}>{fmt(pendingCustomer)}</div>
+          <div style={S.kpiLabel}>متبقي من الزبائن</div>
+        </div>
+        <div style={S.kpi("#e55444")}>
+          <div style={S.kpiVal}>{fmt(pendingSupplier)}</div>
+          <div style={S.kpiLabel}>متبقي للمجهزين</div>
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.cardTitle}>👤 ديون الزبائن</div>
+        {customerDebts.length === 0 ? <div style={S.emptyState}>لا توجد ديون زبائن</div> : renderDebtList(customerDebts, "#27ae60")}
+      </div>
+
+      <div style={S.card}>
+        <div style={S.cardTitle}>🏭 ديون المجهزين</div>
+        {supplierDebts.length === 0 ? <div style={S.emptyState}>لا توجد ديون مجهزين</div> : renderDebtList(supplierDebts, "#e55444")}
+      </div>
+
+      {showForm && (
+        <Modal title="إضافة دين جديد" onClose={() => setShowForm(false)}>
+          <div style={S.formGrid}>
+            <div style={S.formField}>
+              <label style={S.label}>التاريخ</label>
+              <input type="date" style={S.input} value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} />
+            </div>
+            <div style={S.formField}>
+              <label style={S.label}>نوع الدين</label>
+              <select style={S.select} value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}>
+                <option value="customer">دين زبون (لنا)</option>
+                <option value="supplier">دين مجهز (علينا)</option>
+              </select>
+            </div>
+            <div style={S.formField}>
+              <label style={S.label}>الاسم</label>
+              <AutocompleteInput
+                style={S.input}
+                placeholder="اسم الزبون أو المجهز"
+                value={form.name}
+                onChange={v => setForm({ ...form, name: v })}
+                suggestions={[
+                  ...new Set([
+                    ...data.sales.map(s=>s.customer),
+                    ...data.purchases.map(p=>p.supplier),
+                    ...data.debts.map(d=>d.name),
+                  ].filter(Boolean))
+                ]}
+              />
+            </div>
+            <div style={S.formField}>
+              <label style={S.label}>المبلغ (د.ع)</label>
+              <input type="number" style={S.input} placeholder="المبلغ الكلي" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} />
+            </div>
+            <div style={{ ...S.formField, gridColumn: "1/-1" }}>
+              <label style={S.label}>ملاحظات</label>
+              <input style={S.input} placeholder="تفاصيل الدين" value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />
+            </div>
+          </div>
+          <button style={{ ...S.btn("#e67e22"), width: "100%" }} onClick={add}>💾 حفظ الدين</button>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+// ==================== REPORTS (PASSWORD PROTECTED) ====================
+const REPORT_PASSWORD = "owner1234"; // change in settings
+
+function Reports({ data, save, unlocked, onUnlock, onLock }) {
+  const [pwInput, setPwInput] = useState("");
+  const [pwError, setPwError] = useState(false);
+  const [reportType, setReportType] = useState("summary"); // summary | sales | purchases | machinery | workers | expenses | daily
+  const [periodType, setPeriodType] = useState("today"); // today | week | month | year | custom | all
+  const [dateFrom, setDateFrom] = useState(today());
+  const [dateTo, setDateTo] = useState(today());
+  const [editPartners, setEditPartners] = useState(false);
+  const [partnerForm, setPartnerForm] = useState(data.partners);
+
+  // إغلاق تلقائي بعد 10 دقائق من عدم الاستخدام
+  useEffect(() => {
+    if (!unlocked) return;
+    const timer = setTimeout(() => onLock(), 10 * 60 * 1000);
+    return () => clearTimeout(timer);
+  }, [unlocked, data, onLock]);
+
+  if (!unlocked) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "48px 20px" }}>
+        <div style={{ fontSize: 56, marginBottom: 16 }}>🔒</div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: "#f0b429", marginBottom: 8 }}>قسم التقارير والأرباح</div>
+        <div style={{ fontSize: 13, color: "#7a8a9a", marginBottom: 24, textAlign: "center" }}>
+          هذا القسم محمي بكلمة مرور<br />لأصحاب المعمل فقط
+        </div>
+        <div style={{ width: "100%", maxWidth: 320 }}>
+          <input
+            type="password"
+            style={{ ...S.input, textAlign: "center", fontSize: 18, letterSpacing: 4, marginBottom: 10, borderColor: pwError ? "#e55444" : "#2a3545" }}
+            placeholder="••••••••"
+            value={pwInput}
+            onChange={e => { setPwInput(e.target.value); setPwError(false); }}
+            onKeyDown={e => { if (e.key === "Enter") { if (pwInput === (data.settings?.reportPassword || REPORT_PASSWORD)) { onUnlock(); setPwInput(""); } else setPwError(true); } }}
+          />
+          {pwError && <div style={{ color: "#e55444", fontSize: 12, textAlign: "center", marginBottom: 8 }}>❌ كلمة المرور خاطئة</div>}
+          <button style={{ ...S.btn("#f0b429"), width: "100%", color: "#0f1117" }} onClick={() => {
+            if (pwInput === (data.settings?.reportPassword || REPORT_PASSWORD)) { onUnlock(); setPwInput(""); }
+            else setPwError(true);
+          }}>
+            🔓 دخول
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Filter by period ----
+  const getRange = () => {
+    const now = new Date(); const y = now.getFullYear(); const m = now.getMonth();
+    if (periodType === "today") { const t = today(); return [t, t]; }
+    if (periodType === "week") {
+      const d = new Date(); d.setDate(d.getDate() - 6);
+      return [d.toISOString().split("T")[0], today()];
+    }
+    if (periodType === "month") return [`${y}-${String(m+1).padStart(2,"0")}-01`, today()];
+    if (periodType === "year") return [`${y}-01-01`, today()];
+    if (periodType === "custom") return [dateFrom, dateTo];
+    return [null, null]; // all
+  };
+
+  const [rangeFrom, rangeTo] = getRange();
+  const inRange = (item, field = "date") => {
+    if (!rangeFrom) return true;
+    const d = item[field]; return d >= rangeFrom && d <= rangeTo;
+  };
+
+  const filtPurchases = data.purchases.filter(i => inRange(i));
+  const filtSales = data.sales.filter(i => inRange(i));
+  const filtMachinery = data.machinery.filter(i => inRange(i));
+  const filtExpenses = (data.expenses || []).filter(i => inRange(i));
+
+  const totSales = filtSales.reduce((s, p) => s + (p.total || 0), 0);
+  const totPurchases = filtPurchases.reduce((s, p) => s + (p.total || 0), 0);
+  const totMachinery = filtMachinery.reduce((s, m) => s + (m.amount || 0), 0);
+  const totExpensesGen = filtExpenses.reduce((s, e) => s + (e.amount || 0), 0);
+  const totWorkers = data.workers.reduce((s, w) => {
+    const g = w.wageType === "monthly" ? w.wage : (w.wage || 0) * (w.shifts || 0);
+    return s + g - (w.advance || 0);
+  }, 0);
+  const totalAllCosts = totPurchases + totMachinery + totExpensesGen + (periodType === "month" || periodType === "all" ? totWorkers : 0);
+  const netProfit = totSales - totalAllCosts;
+  const isProfit = netProfit >= 0;
+
+  // ---- Auto daily snapshot (saved at end of day) ----
+  const todayStr = today();
+  const snapshots = data.dailySnapshots || [];
+  const hasToday = snapshots.some(s => s.date === todayStr);
+  const saveSnapshot = () => {
+    if (hasToday) return;
+    const todaySales     = data.sales.filter(s => s.date === todayStr).reduce((acc, curr) => acc + curr.total, 0);
+    const todayPurchases = data.purchases.filter(p => p.date === todayStr).reduce((acc, curr) => acc + curr.total, 0);
+    const todayExpenses  = (data.expenses || []).filter(e => e.date === todayStr).reduce((acc, curr) => acc + curr.amount, 0);
+    const todayMachinery = data.machinery.filter(m => m.date === todayStr).reduce((acc, curr) => acc + curr.amount, 0);
+    const snap = {
+      date: todayStr,
+      sales:     todaySales,
+      purchases: todayPurchases,
+      expenses:  todayExpenses,
+      machinery: todayMachinery,
+      net: todaySales - (todayPurchases + todayExpenses + todayMachinery),
+    };
+    save({ ...data, dailySnapshots: [...snapshots, snap] });
+  };
+
+  const savePartners = () => { save({ ...data, partners: partnerForm }); setEditPartners(false); };
+
+  const periodLabels = { today: "اليوم", week: "الأسبوع", month: "الشهر", year: "السنة", custom: "فترة مخصصة", all: "كل الفترات" };
+
+  const btnPeriod = (v) => ({
+    padding: "6px 12px", borderRadius: 20, border: `1px solid ${periodType===v?"#f0b429":"#2a3545"}`,
+    background: periodType===v?"#f0b429":"none", color: periodType===v?"#0f1117":"#7a8a9a",
+    cursor: "pointer", fontSize: 11, fontFamily: "inherit", fontWeight: periodType===v?700:400,
+  });
+  const btnReport = (v) => ({
+    padding: "6px 10px", borderRadius: 8, border: `1px solid ${reportType===v?"#4a90e2":"#2a3545"}`,
+    background: reportType===v?"#1a2a3a":"none", color: reportType===v?"#4a90e2":"#7a8a9a",
+    cursor: "pointer", fontSize: 11, fontFamily: "inherit",
+  });
+
+  return (
+    <>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <h2 style={{ color: "#f0b429", margin: 0, fontSize: 18 }}>📈 التقارير والتحليل</h2>
+        <button style={{ ...S.btn("#e55444"), fontSize: 11, padding: "6px 10px" }} onClick={onLock}>
+          🔒 قفل
+        </button>
+      </div>
+
+      {/* Period & report type selector */}
+      <div style={{ background: "#0d1117", borderRadius: 12, padding: 14, border: "1px solid #2a3545", marginBottom: 12 }}>
+        {/* Quick period buttons */}
+        <div style={{ fontSize: 11, color: "#7a8a9a", marginBottom: 6, fontWeight: 700 }}>📅 الفترة الزمنية</div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+          {["today","week","month","year","custom","all"].map(v => (
+            <button key={v} style={btnPeriod(v)} onClick={() => setPeriodType(v)}>{periodLabels[v]}</button>
+          ))}
+        </div>
+
+        {/* Date range - ALWAYS visible, highlighted when custom */}
+        <div style={{ background: periodType==="custom" ? "#0a1520" : "#0a0d10", borderRadius: 8, padding: "10px 12px", border: `1px solid ${periodType==="custom"?"#4a90e2":"#1e2530"}`, marginBottom: 10 }}>
+          <div style={{ fontSize: 11, color: periodType==="custom"?"#4a90e2":"#4a5a6a", fontWeight: 700, marginBottom: 8 }}>
+            🔍 بحث بالتاريخ — {periodType==="custom" ? "مفعّل" : "اختر تاريخاً أو اضغط «فترة مخصصة»"}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div>
+              <label style={{ ...S.label, color: "#4a90e2" }}>من تاريخ</label>
+              <input
+                type="date"
+                style={{ ...S.input, fontSize: 13, borderColor: periodType==="custom"?"#4a90e266":"#1e2530" }}
+                value={dateFrom}
+                onChange={e => { setDateFrom(e.target.value); setPeriodType("custom"); }}
+              />
+            </div>
+            <div>
+              <label style={{ ...S.label, color: "#4a90e2" }}>إلى تاريخ</label>
+              <input
+                type="date"
+                style={{ ...S.input, fontSize: 13, borderColor: periodType==="custom"?"#4a90e266":"#1e2530" }}
+                value={dateTo}
+                onChange={e => { setDateTo(e.target.value); setPeriodType("custom"); }}
+              />
+            </div>
+          </div>
+          {periodType === "custom" && (
+            <div style={{ fontSize: 11, color: "#4a90e2", marginTop: 6, textAlign: "center" }}>
+              ✅ عرض النتائج من {dateFrom} إلى {dateTo}
+            </div>
+          )}
+        </div>
+
+        {/* Report type */}
+        <div style={{ fontSize: 11, color: "#7a8a9a", marginBottom: 6, fontWeight: 700 }}>📋 نوع التقرير</div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {[["summary","📊 ملخص"],["sales","💰 مبيعات"],["purchases","📦 مشتريات"],["machinery","⚙️ آليات"],["workers","👷 موظفون"],["expenses","🧾 مصاريف"],["daily","📅 سجل يومي"]].map(([v,l]) => (
+            <button key={v} style={btnReport(v)} onClick={() => setReportType(v)}>{l}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* ---- SUMMARY ---- */}
+      {reportType === "summary" && (
+        <>
+          {/* Net result banner */}
+          <div style={{ ...S.card, background: isProfit ? "#0a140a" : "#140a0a", border: `2px solid ${isProfit?"#4caf5066":"#e5544466"}`, marginBottom: 12 }}>
+            <div style={{ textAlign: "center", padding: "10px 0" }}>
+              <div style={{ fontSize: 13, color: "#7a8a9a", marginBottom: 4 }}>{periodLabels[periodType]} — {periodType==="custom"?`${dateFrom} → ${dateTo}`:""}</div>
+              <div style={{ fontSize: 30, fontWeight: 700, color: isProfit?"#4caf50":"#e55444" }}>
+                {isProfit?"▲ ربح":"▼ خسارة"} {fmt(Math.abs(netProfit))}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10, marginBottom: 12 }}>
+            {[
+              {l:"إيرادات المبيعات", v:fmt(totSales), c:"#4caf50"},
+              {l:"تكلفة المشتريات", v:fmt(totPurchases), c:"#e67e22"},
+              {l:"مصاريف الآليات", v:fmt(totMachinery), c:"#9b59b6"},
+              {l:"مصاريف عامة", v:fmt(totExpensesGen), c:"#e55444"},
+            ].map((k,i)=>(
+              <div key={i} style={{ ...S.kpi(k.c), padding: 10 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: k.c }}>{k.v}</div>
+                <div style={{ fontSize: 11, color: "#7a8a9a" }}>{k.l}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Partners */}
+          <div style={S.card}>
+            <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
+              <span>🤝 توزيع الأرباح</span>
+              <button style={{ ...S.btn("#4a90e2"), padding: "4px 10px", fontSize: 11 }} onClick={() => setEditPartners(!editPartners)}>✏️ تعديل</button>
+            </div>
+            {editPartners ? (
+              <div>
+                {partnerForm.map((p,i) => (
+                  <div key={p.id} style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                    <input style={{ ...S.input, flex: 2 }} value={p.name} onChange={e => { const nf=[...partnerForm]; nf[i]={...nf[i],name:e.target.value}; setPartnerForm(nf); }} />
+                    <input type="number" style={{ ...S.input, flex: 1 }} value={p.share} onChange={e => { const nf=[...partnerForm]; nf[i]={...nf[i],share:parseFloat(e.target.value)||0}; setPartnerForm(nf); }} />
+                    <span style={{ color: "#7a8a9a", alignSelf: "center", fontSize: 12 }}>%</span>
+                  </div>
+                ))}
+                <button style={{ ...S.btn("#27ae60"), width: "100%" }} onClick={savePartners}>💾 حفظ</button>
+              </div>
+            ) : isProfit ? (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+                {data.partners.map(p => (
+                  <div key={p.id} style={{ background: "#0d1520", borderRadius: 10, padding: 12, textAlign: "center" }}>
+                    <div style={{ fontSize: 18, marginBottom: 4 }}>👤</div>
+                    <div style={{ fontWeight: 700, color: "#e8e0d5", fontSize: 13 }}>{p.name}</div>
+                    <div style={{ fontSize: 11, color: "#7a8a9a" }}>{p.share}%</div>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: "#4caf50", marginTop: 6 }}>{fmt((netProfit*p.share)/100)}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ textAlign: "center", color: "#e55444", padding: 16 }}>⚠️ لا يوجد ربح للتوزيع</div>
+            )}
+          </div>
+
+          {/* Save today snapshot */}
+          <div style={{ ...S.card, border: "1px solid #4a90e244" }}>
+            <div style={S.cardTitle}>📅 حفظ تقرير اليوم</div>
+            <div style={{ fontSize: 12, color: "#7a8a9a", marginBottom: 10 }}>
+              {hasToday ? "✅ تقرير اليوم محفوظ بالفعل" : "اضغط لحفظ لقطة يومية تُراكم في السجل اليومي"}
+            </div>
+            <button style={{ ...S.btn("#4a90e2"), width: "100%", opacity: hasToday ? 0.4 : 1 }} onClick={saveSnapshot} disabled={hasToday}>
+              💾 حفظ تقرير {todayStr}
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* ---- SALES REPORT ---- */}
+      {reportType === "sales" && (
+        <div style={S.card}>
+          <div style={S.cardTitle}>💰 تقرير المبيعات — {fmt(totSales)} إجمالي</div>
+          {filtSales.length === 0 ? <div style={S.emptyState}>لا توجد مبيعات في هذه الفترة</div> : (
+            <table style={S.table}>
+              <thead><tr>
+                <th style={S.th}>التاريخ</th><th style={S.th}>الزبون</th>
+                <th style={S.th}>الوزن(طن)</th><th style={S.th}>السعر/طن</th>
+                <th style={S.th}>الإجمالي</th><th style={S.th}>الحالة</th>
+              </tr></thead>
+              <tbody>
+                {[...filtSales].reverse().map(p => (
+                  <tr key={p.id}>
+                    <td style={S.td}>{p.date}</td><td style={S.td}>{p.customer}</td>
+                    <td style={S.td}>{fmtNum(p.weight)}</td><td style={S.td}>{fmt(p.price)}</td>
+                    <td style={{...S.td,fontWeight:700,color:"#4caf50"}}>{fmt(p.total)}</td>
+                    <td style={S.td}><span style={S.badge(p.payType==="cash"?"#4caf50":"#e67e22")}>{p.payType==="cash"?"نقدي":"آجل"}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {/* ---- PURCHASES REPORT ---- */}
+      {reportType === "purchases" && (
+        <div style={S.card}>
+          <div style={S.cardTitle}>📦 تقرير المشتريات — {fmt(totPurchases)} إجمالي</div>
+          {filtPurchases.length === 0 ? <div style={S.emptyState}>لا توجد مشتريات في هذه الفترة</div> : (
+            <table style={S.table}>
+              <thead><tr>
+                <th style={S.th}>التاريخ</th><th style={S.th}>المجهز</th>
+                <th style={S.th}>صافي(كغم)</th><th style={S.th}>سعر/كغم</th><th style={S.th}>الإجمالي</th>
+              </tr></thead>
+              <tbody>
+                {[...filtPurchases].reverse().map(p => (
+                  <tr key={p.id}>
+                    <td style={S.td}>{p.date}</td><td style={S.td}>{p.supplier}</td>
+                    <td style={S.td}>{fmtNum(p.weight)}</td><td style={S.td}>{fmt(p.price)}</td>
+                    <td style={{...S.td,fontWeight:700,color:"#f0b429"}}>{fmt(p.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {/* ---- MACHINERY REPORT ---- */}
+      {reportType === "machinery" && (
+        <div style={S.card}>
+          <div style={S.cardTitle}>⚙️ تقرير الآليات — {fmt(totMachinery)} إجمالي</div>
+          {filtMachinery.length === 0 ? <div style={S.emptyState}>لا توجد مصاريف آليات</div> : (
+            <table style={S.table}>
+              <thead><tr><th style={S.th}>التاريخ</th><th style={S.th}>الآلية</th><th style={S.th}>النوع</th><th style={S.th}>المبلغ</th><th style={S.th}>ملاحظات</th></tr></thead>
+              <tbody>
+                {[...filtMachinery].reverse().map(m => (
+                  <tr key={m.id}>
+                    <td style={S.td}>{m.date}</td><td style={S.td}>{m.machine}</td>
+                    <td style={S.td}><span style={S.badge(m.expType==="fuel"?"#e67e22":m.expType==="oil"?"#8e44ad":"#4a90e2")}>{m.expType==="fuel"?"⛽ وقود":m.expType==="oil"?"🛢️ زيت":"🔧 صيانة"}</span></td>
+                    <td style={{...S.td,fontWeight:700,color:"#9b59b6"}}>{fmt(m.amount)}</td>
+                    <td style={{...S.td,color:"#7a8a9a",fontSize:11}}>{m.notes}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {/* ---- WORKERS REPORT ---- */}
+      {reportType === "workers" && (
+        <div style={S.card}>
+          <div style={S.cardTitle}>👷 تقرير العمال — {fmt(totWorkers)} صافي رواتب</div>
+          {data.workers.length === 0 ? <div style={S.emptyState}>لا توجد بيانات موظفين</div> : (
+            <table style={S.table}>
+              <thead><tr><th style={S.th}>الاسم</th><th style={S.th}>نوع الأجر</th><th style={S.th}>الأجر</th><th style={S.th}>الوحدات</th><th style={S.th}>السلفة</th><th style={S.th}>الصافي</th></tr></thead>
+              <tbody>
+                {data.workers.map(w => {
+                  const gross = w.wageType==="monthly"?w.wage:(w.wage||0)*(w.shifts||0);
+                  const net = gross-(w.advance||0);
+                  return (
+                    <tr key={w.id}>
+                      <td style={{...S.td,fontWeight:600}}>{w.name}</td>
+                      <td style={S.td}><span style={S.badge(w.wageType==="monthly"?"#4a90e2":w.wageType==="weekly"?"#f0b429":"#1abc9c")}>{w.wageType==="monthly"?"شهري":w.wageType==="weekly"?"أسبوعي":"يومي"}</span></td>
+                      <td style={S.td}>{fmt(w.wage)}</td>
+                      <td style={S.td}>{w.wageType!=="monthly"?w.shifts||0:"-"}</td>
+                      <td style={{...S.td,color:"#e55444"}}>{w.advance>0?fmt(w.advance):"-"}</td>
+                      <td style={{...S.td,fontWeight:700,color:"#1abc9c"}}>{fmt(net)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {/* ---- EXPENSES REPORT ---- */}
+      {reportType === "expenses" && (
+        <div style={S.card}>
+          <div style={S.cardTitle}>🧾 تقرير المصاريف العامة — {fmt(totExpensesGen)} إجمالي</div>
+          {filtExpenses.length === 0 ? <div style={S.emptyState}>لا توجد مصاريف في هذه الفترة</div> : (
+            <table style={S.table}>
+              <thead><tr><th style={S.th}>التاريخ</th><th style={S.th}>النوع</th><th style={S.th}>المبلغ</th><th style={S.th}>ملاحظات</th></tr></thead>
+              <tbody>
+                {[...filtExpenses].reverse().map(e => {
+                  const EXPENSE_CATS_MAP = {rent:"🏠 إيجار",food:"🍽️ طعام",transport:"🚗 نقل",misc:"📎 نثرية",electricity:"⚡ كهرباء",internet:"🌐 إنترنت"};
+                  return (
+                    <tr key={e.id}>
+                      <td style={S.td}>{e.date}</td>
+                      <td style={S.td}><span style={S.badge("#e55444")}>{EXPENSE_CATS_MAP[e.category]||e.category}</span></td>
+                      <td style={{...S.td,fontWeight:700,color:"#e55444"}}>{fmt(e.amount)}</td>
+                      <td style={{...S.td,color:"#7a8a9a",fontSize:11}}>{e.notes}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {/* ---- DAILY LOG ---- */}
+      {reportType === "daily" && (
+        <div style={S.card}>
+          <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
+            <span>📅 السجل اليومي المحفوظ</span>
+            <button style={{ ...S.btn("#4a90e2"), fontSize: 11, padding: "4px 10px" }} onClick={saveSnapshot} disabled={hasToday}>
+              {hasToday ? "✅ محفوظ اليوم" : "💾 حفظ اليوم"}
+            </button>
+          </div>
+          {snapshots.length === 0 ? (
+            <div style={S.emptyState}>📅 لا توجد لقطات يومية محفوظة بعد — اضغط "حفظ اليوم" كل مساء</div>
+          ) : (
+            <table style={S.table}>
+              <thead><tr>
+                <th style={S.th}>التاريخ</th><th style={S.th}>مبيعات</th>
+                <th style={S.th}>مشتريات</th><th style={S.th}>مصاريف</th>
+                <th style={{...S.th,color:"#4caf50"}}>صافي اليوم</th>
+              </tr></thead>
+              <tbody>
+                {[...snapshots].reverse().map((s,i) => (
+                  <tr key={i}>
+                    <td style={{...S.td,fontWeight:600}}>{s.date}</td>
+                    <td style={{...S.td,color:"#4caf50"}}>{fmt(s.sales)}</td>
+                    <td style={{...S.td,color:"#e67e22"}}>{fmt(s.purchases)}</td>
+                    <td style={{...S.td,color:"#e55444"}}>{fmt((s.expenses||0)+(s.machinery||0))}</td>
+                    <td style={{...S.td,fontWeight:700,color:s.net>=0?"#4caf50":"#e55444"}}>{fmt(s.net)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ── n8n Webhook helpers ──
+const N8N_KEY = "cardboard_n8n_cfg";
+function getN8nCfg()    { try { return JSON.parse(localStorage.getItem(N8N_KEY) || "{}"); } catch { return {}; } }
+function setN8nCfg(cfg) { try { localStorage.setItem(N8N_KEY, JSON.stringify(cfg)); } catch {} }
+
+// ==================== SETTINGS ====================
+function Settings({ data, save, updateSbCfg, hasSb, token, syncStatus, onLoginClick, onSignOut }) {
+  const [name, setName]   = useState(data.settings?.factoryName || "معمل كبس الكارتون");
+  const [newPw, setNewPw] = useState("");
+
+  // Supabase config state (reads from localStorage)
+  const storedCfg = getSbCfg();
+  const [sbUrl,        setSbUrl]        = useState(storedCfg.url  || "");
+  const [sbKey,        setSbKey]        = useState(storedCfg.key  || "");
+  const [sbMode,       setSbMode]       = useState(storedCfg.mode || "write");
+  const [sbTestStatus, setSbTestStatus] = useState(""); // "" | "testing" | "ok" | "error"
+
+  // n8n config state
+  const storedN8n = getN8nCfg();
+  const [n8nWebhook,    setN8nWebhook]    = useState(storedN8n.webhook || "");
+  const [n8nSecret,     setN8nSecret]     = useState(storedN8n.secret  || "");
+  const [n8nTestStatus, setN8nTestStatus] = useState(""); // "" | "testing" | "ok" | "error"
+
+  const saveN8nCfg = () => {
+    setN8nCfg({ webhook: n8nWebhook.trim(), secret: n8nSecret.trim() });
+    alert("✅ تم حفظ إعدادات n8n بنجاح!");
+  };
+
+  const testN8nWebhook = async () => {
+    if (!n8nWebhook.trim()) return;
+    setN8nTestStatus("testing");
+    try {
+      const cfg = getSbCfg();
+      const payload = {
+        action: "test_connection",
+        timestamp: new Date().toISOString(),
+        factory: data.settings?.factoryName || "معمل كبس الكارتون",
+        secret: n8nSecret,
+        summary: {
+          totalSales: data.sales.reduce((s,p) => s+(p.total||0),0),
+          totalPurchases: data.purchases.reduce((s,p) => s+(p.total||0),0),
+          openDebts: data.debts.filter(d=>d.status!=="paid").length,
+          workersCount: data.workers.length,
+        }
+      };
+      const res = await fetch(n8nWebhook.trim(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      setN8nTestStatus(res.ok ? "ok" : "error");
+    } catch { setN8nTestStatus("error"); }
+  };
+
+  const sendManualReport = async () => {
+    const cfg = getN8nCfg();
+    if (!cfg.webhook) { alert("أدخل Webhook URL أولاً"); return; }
+    const todayStr = today();
+    const totalPurchases = data.purchases.reduce((s,p) => s+(p.total||0),0);
+    const totalSales = data.sales.reduce((s,p) => s+(p.total||0),0);
+    const totalWorkers = data.workers.reduce((s,w) => s+(w.wage||0)+(w.extraPay||0)-(w.advance||0),0);
+    const totalMachinery = data.machinery.reduce((s,m) => s+(m.amount||0),0);
+    const totalExpenses = (data.expenses||[]).reduce((s,e) => s+(e.amount||0),0);
+    const netProfit = totalSales - (totalPurchases + totalWorkers + totalMachinery + totalExpenses);
+    const pendingDebtsIn = data.debts.filter(d=>d.type==="customer"&&d.status!=="paid").reduce((s,d)=>s+((d.amount||0)-(d.payments||[]).reduce((a,p)=>a+p.amount,0)),0);
+    const pendingDebtsOut = data.debts.filter(d=>d.type==="supplier"&&d.status!=="paid").reduce((s,d)=>s+((d.amount||0)-(d.payments||[]).reduce((a,p)=>a+p.amount,0)),0);
+    const todaySales = data.sales.filter(s=>s.date===todayStr).reduce((a,s)=>a+s.total,0);
+    const todayPurchases = data.purchases.filter(p=>p.date===todayStr).reduce((a,p)=>a+p.total,0);
+    try {
+      const res = await fetch(cfg.webhook, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "manual_report",
+          secret: cfg.secret,
+          timestamp: new Date().toISOString(),
+          date: todayStr,
+          factory: data.settings?.factoryName || "معمل كبس الكارتون",
+          summary: {
+            totalSales, totalPurchases, totalWorkers, totalMachinery, totalExpenses, netProfit,
+            pendingDebtsIn, pendingDebtsOut,
+            todaySales, todayPurchases,
+            workersCount: data.workers.length,
+            openDebtsCount: data.debts.filter(d=>d.status!=="paid").length,
+            pendingWeighsCount: (data.pendingWeighs||[]).length,
+            pendingSalesCount: (data.pendingSales||[]).length,
+          },
+          partners: data.partners.map(p => ({
+            name: p.name,
+            share: p.share,
+            profit: Math.round(netProfit * p.share / 100),
+          })),
+          alerts: [
+            ...data.debts.filter(d=>d.status!=="paid").filter(d=>{
+              const paid=(d.payments||[]).reduce((a,p)=>a+p.amount,0);
+              const remaining=(d.amount||0)-paid;
+              const daysOld=Math.floor((Date.now()-new Date(d.date).getTime())/(86400000));
+              return remaining>0 && daysOld>30;
+            }).map(d=>({ type:"old_debt", name:d.name, amount:d.amount, daysOld: Math.floor((Date.now()-new Date(d.date).getTime())/(86400000)) })),
+            ...(data.pendingWeighs||[]).length>3 ? [{ type:"queue_alert", message:`${(data.pendingWeighs||[]).length} شاحنات في الطابور` }] : [],
+          ]
+        }),
+      });
+      if (res.ok) alert("✅ تم إرسال التقرير إلى n8n بنجاح!");
+      else alert("❌ فشل الإرسال — تأكد من Webhook URL");
+    } catch(e) { alert("❌ خطأ: " + e.message); }
+  };
+
+  const saveSbCfg = () => {
+    const cfg = { url: sbUrl.trim(), key: sbKey.trim(), mode: sbMode };
+    updateSbCfg(cfg);
+    alert("✅ تم حفظ إعدادات Supabase.\n\nأعد تشغيل التطبيق لتفعيل المزامنة.\nثم سجّل دخولك بالإيميل وكلمة المرور.");
+  };
+
+  const testSbConnection = async () => {
+    if (!sbUrl.trim() || !sbKey.trim()) return;
+    setSbTestStatus("testing");
+    try {
+      const result = await sbAPI.pull(sbUrl.trim(), sbKey.trim(), null);
+      setSbTestStatus(result !== undefined ? "ok" : "error");
+    } catch { setSbTestStatus("error"); }
+  };
+
+  const clearSbCfg = () => {
+    if (window.confirm("هل تريد فصل هذا الجهاز عن Supabase؟")) {
+      updateSbCfg({});
+      setSbUrl(""); setSbKey(""); setSbMode("write");
+      setSbToken("");
+      alert("✅ تم فصل الجهاز — يعمل محلياً فقط");
+    }
+  };
+
+  const exportData = () => {
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `factory-data-${today()}.json`;
+    a.click();
+  };
+
+  const resetConfirm = () => {
+    if (window.confirm("⚠️ هل أنت متأكد من حذف جميع البيانات؟")) {
+      save(defaultData);
+    }
+  };
+
+  return (
+    <>
+      <h2 style={{ color: "#f0b429", margin: "0 0 16px 0", fontSize: 18 }}>
+        🔧 الإعدادات
+      </h2>
+
+      <div style={S.card}>
+        <div style={S.cardTitle}>🏭 إعدادات المعمل</div>
+        <div style={{ ...S.formField, marginBottom: 12 }}>
+          <label style={S.label}>اسم المعمل</label>
+          <input style={S.input} value={name} onChange={e => setName(e.target.value)} />
+        </div>
+        <button
+          style={{ ...S.btn("#f0b429"), color: "#0f1117", width: "100%", marginBottom: 8 }}
+          onClick={() => save({ ...data, settings: { ...data.settings, factoryName: name } })}
+        >
+          💾 حفظ الاسم
+        </button>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.cardTitle}>🔐 تغيير كلمة مرور التقارير</div>
+        <div style={{ fontSize: 12, color: "#7a8a9a", marginBottom: 10 }}>
+          كلمة المرور الحالية لحماية التقارير والأرباح
+        </div>
+        <input type="password" style={{ ...S.input, marginBottom: 10 }} placeholder="كلمة المرور الجديدة"
+          value={newPw} onChange={e => setNewPw(e.target.value)} />
+        <button style={{ ...S.btn("#e55444"), width: "100%" }} onClick={() => {
+          if (newPw.length < 4) return;
+          save({ ...data, settings: { ...data.settings, reportPassword: newPw } });
+          setNewPw("");
+          alert("✅ تم تغيير كلمة المرور");
+        }}>
+          🔐 تغيير كلمة المرور
+        </button>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.cardTitle}>📤 تصدير واسترجاع البيانات</div>
+        <button style={{ ...S.btn("#4a90e2"), width: "100%", marginBottom: 10 }} onClick={exportData}>
+          📥 تصدير نسخة احتياطية JSON
+        </button>
+        <div style={{ background: "#0d1117", borderRadius: 8, padding: 12, fontSize: 11, color: "#7a8a9a", marginBottom: 10 }}>
+          إجمالي السجلات: {data.purchases.length + data.sales.length + data.machinery.length + data.workers.length + (data.expenses||[]).length} سجل
+        </div>
+        <button style={{ ...S.btnDanger, width: "100%", textAlign: "center" }} onClick={resetConfirm}>
+          ⚠️ إعادة تعيين جميع البيانات
+        </button>
+      </div>
+
+      {/* FIX 6: Database & backup info */}
+      {/* ══ SUPABASE CONFIG ══ */}
+      <div style={{ background: "#060e1a", borderRadius: 12, padding: 16, border: "1px solid #4a90e266", marginBottom: 12 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#4a90e2", marginBottom: 4 }}>☁️ ربط Supabase — مزامنة سحابية</div>
+        <div style={{ fontSize: 11, color: "#7a8a9a", marginBottom: 14 }}>
+          ربط الجهاز بقاعدة بيانات Supabase — يحل مشكلة ضياع البيانات والمزامنة بين الأجهزة
+        </div>
+
+        {/* Device Mode */}
+        <div style={{ marginBottom: 12 }}>
+          <label style={S.label}>نوع هذا الجهاز</label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 6 }}>
+            {[
+              { v: "write", label: "✏️ جهاز الكتابة", desc: "اللابتوب — يكتب ويقرأ", color: "#27ae60" },
+              { v: "read",  label: "👁️ جهاز القراءة", desc: "الموبايل — يراقب فقط", color: "#9b59b6" },
+            ].map(opt => (
+              <div
+                key={opt.v}
+                onClick={() => setSbMode(opt.v)}
+                style={{
+                  borderRadius: 8, padding: "10px 12px", cursor: "pointer",
+                  border: `2px solid ${sbMode === opt.v ? opt.color : "#2a3545"}`,
+                  background: sbMode === opt.v ? opt.color + "15" : "#0d1117",
+                  transition: "all 0.2s",
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 700, color: sbMode === opt.v ? opt.color : "#c8d0da" }}>{opt.label}</div>
+                <div style={{ fontSize: 10, color: "#7a8a9a", marginTop: 2 }}>{opt.desc}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* URL */}
+        <div style={{ marginBottom: 8 }}>
+          <label style={{ ...S.label, color: "#4a90e2" }}>Project URL</label>
+          <input
+            style={{ ...S.input, fontFamily: "monospace", fontSize: 12 }}
+            placeholder="https://xxxxxxxx.supabase.co"
+            value={sbUrl}
+            onChange={e => setSbUrl(e.target.value)}
+          />
+        </div>
+
+        {/* API Key */}
+        <div style={{ marginBottom: 8 }}>
+          <label style={{ ...S.label, color: "#4a90e2" }}>Anon Key (مفتاح API)</label>
+          <input
+            type="password"
+            style={{ ...S.input, fontFamily: "monospace", fontSize: 12 }}
+            placeholder="eyJhbGciOiJIUzI1NiIs..."
+            value={sbKey}
+            onChange={e => setSbKey(e.target.value)}
+          />
+        </div>
+
+        {/* Auth status — login/logout for write device */}
+        {sbMode === "write" && (
+          <div style={{ marginBottom: 12, background: token ? "#0a1a0a" : "#100a1a", border: `1px solid ${token ? "#27ae6044" : "#9b59b644"}`, borderRadius: 8, padding: "10px 12px" }}>
+            {token ? (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div>
+                  <div style={{ fontSize: 12, color: "#27ae60", fontWeight: 700 }}>✅ مسجّل الدخول — وضع الكتابة</div>
+                  <div style={{ fontSize: 10, color: "#7a8a9a", marginTop: 2 }}>يمكنك الإدخال والتعديل والمزامنة</div>
+                </div>
+                <button
+                  onClick={onSignOut}
+                  style={{ background: "none", border: "1px solid #e5544444", borderRadius: 6, padding: "4px 10px", color: "#e55444", cursor: "pointer", fontFamily: "inherit", fontSize: 11 }}
+                >
+                  خروج
+                </button>
+              </div>
+            ) : (
+              <div>
+                <div style={{ fontSize: 12, color: "#9b59b6", marginBottom: 8 }}>
+                  🔐 غير مسجّل — الإدخال موقوف حتى تسجّل دخولك
+                </div>
+                <button
+                  onClick={onLoginClick}
+                  style={{ width: "100%", background: "linear-gradient(135deg, #4a90e2, #2980b9)", border: "none", borderRadius: 8, padding: "9px", color: "#fff", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700 }}
+                >
+                  🔑 تسجيل الدخول (إيميل + كلمة مرور)
+                </button>
+                <div style={{ fontSize: 10, color: "#4a5a6a", marginTop: 6, textAlign: "center" }}>
+                  المستخدم يُنشأ في: Supabase → Authentication → Users
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Action buttons */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+          <button
+            style={{ flex: 1, background: "#4a90e222", border: "1px solid #4a90e2", borderRadius: 8, padding: "9px", color: "#4a90e2", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700 }}
+            onClick={testSbConnection}
+            disabled={!sbUrl || !sbKey}
+          >
+            {sbTestStatus === "testing" ? "⏳ جاري الاختبار..." : sbTestStatus === "ok" ? "✅ الاتصال يعمل" : sbTestStatus === "error" ? "❌ فشل الاتصال" : "🔌 اختبار الاتصال"}
+          </button>
+          <button
+            style={{ flex: 1, background: "#27ae6022", border: "1px solid #27ae60", borderRadius: 8, padding: "9px", color: "#27ae60", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700 }}
+            onClick={saveSbCfg}
+            disabled={!sbUrl || !sbKey}
+          >
+            💾 حفظ الإعدادات
+          </button>
+        </div>
+
+        {sbUrl && (
+          <button
+            style={{ width: "100%", background: "none", border: "1px solid #e5544444", borderRadius: 8, padding: "7px", color: "#e55444", cursor: "pointer", fontFamily: "inherit", fontSize: 11 }}
+            onClick={clearSbCfg}
+          >
+            🔌 فصل هذا الجهاز عن Supabase
+          </button>
+        )}
+
+        {/* Setup instructions */}
+        <div style={{ marginTop: 12, background: "#0a0d10", borderRadius: 8, padding: 10, fontSize: 11, color: "#7a8a9a" }}>
+          <div style={{ color: "#f0b429", fontWeight: 700, marginBottom: 6 }}>📋 خطوات الإعداد:</div>
+          <div style={{ lineHeight: 2 }}>
+            1️⃣ سجّل مجاناً على <span style={{color:"#4a90e2"}}>supabase.com</span><br/>
+            2️⃣ أنشئ مشروع جديد<br/>
+            3️⃣ في SQL Editor شغّل سكريبت الإعداد من ملف <span style={{color:"#f0b429"}}>supabase-setup.sql</span><br/>
+            4️⃣ من Project Settings → API انسخ URL و Anon Key<br/>
+            5️⃣ في Authentication → Users أنشئ مستخدم بإيميل وكلمة مرور (للابتوب)<br/>
+            6️⃣ أدخل المعلومات هنا واضغط «حفظ الإعدادات» ثم «تسجيل الدخول»<br/>
+            7️⃣ على الموبايل: أدخل URL و Anon Key، اختر «جهاز القراءة» (بدون دخول)
+          </div>
+        </div>
+      </div>
+
+      <div style={{ background: "#0a1020", borderRadius: 12, padding: 16, border: "1px solid #4a90e244" }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#4a90e2", marginBottom: 12 }}>💾 قاعدة البيانات والنسخ الاحتياطي</div>
+
+        <div style={{ background: "#0d1117", borderRadius: 8, padding: 12, marginBottom: 10, fontSize: 12 }}>
+          <div style={{ color: "#f0b429", fontWeight: 700, marginBottom: 6 }}>📌 كيف تُحفظ البيانات الآن؟</div>
+          <div style={{ color: "#c8d0da", lineHeight: 1.8 }}>
+            البيانات محفوظة في متصفح الحاسبة (IndexedDB / localStorage).
+            تبقى حتى بعد إغلاق المتصفح لكن <span style={{color:"#e67e22",fontWeight:700}}>تُحذف إذا مسحت بيانات المتصفح</span>.
+          </div>
+        </div>
+
+        <div style={{ background: "#0d1117", borderRadius: 8, padding: 12, marginBottom: 10, fontSize: 12 }}>
+          <div style={{ color: "#4caf50", fontWeight: 700, marginBottom: 6 }}>✅ الحل الموصى به — نسخ يومية</div>
+          <div style={{ color: "#c8d0da", lineHeight: 1.9 }}>
+            1️⃣ كل مساء اضغط زر <span style={{color:"#4a90e2"}}>«تصدير نسخة احتياطية»</span> أعلاه<br/>
+            2️⃣ احفظ الملف في Google Drive أو USB أو إيميل<br/>
+            3️⃣ لاسترجاع البيانات: اضغط «استيراد» وأختر الملف
+          </div>
+        </div>
+
+        <div style={{ background: "#0d1117", borderRadius: 8, padding: 12, marginBottom: 10, fontSize: 12 }}>
+          <div style={{ color: "#9b59b6", fontWeight: 700, marginBottom: 6 }}>🖥️ لو نصّبت البرنامج على الحاسبة</div>
+          <div style={{ color: "#c8d0da", lineHeight: 1.9 }}>
+            إذا نصّبته كـ <span style={{color:"#f0b429"}}>PWA (تطبيق محلي)</span> أو على <span style={{color:"#f0b429"}}>Electron</span>:<br/>
+            ✔️ يعمل بدون إنترنت<br/>
+            ✔️ يمكن ربطه بقاعدة بيانات SQLite محلية تحفظ تلقائياً<br/>
+            ✔️ يمكن جدولة نسخ احتياطية تلقائية لـ Google Drive عبر n8n<br/>
+            📞 <span style={{color:"#4a90e2"}}>تواصل مع مطور لتحويله لتطبيق سطح مكتب كامل</span>
+          </div>
+        </div>
+
+        <div style={{ background: "#1a0d00", borderRadius: 8, padding: 10, fontSize: 11, border: "1px solid #e67e2233" }}>
+          <span style={{ color: "#e67e22", fontWeight: 700 }}>⚠️ تحذير:</span>
+          <span style={{ color: "#c8a080", marginRight: 6 }}>لا تمسح بيانات المتصفح (Cache/Cookies) بدون تصدير نسخة احتياطية أولاً.</span>
+        </div>
+
+        {/* Import JSON */}
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 11, color: "#7a8a9a", marginBottom: 6 }}>استيراد نسخة احتياطية سابقة:</div>
+          <input
+            type="file"
+            accept=".json"
+            style={{ display: "none" }}
+            id="importFile"
+            onChange={e => {
+              const file = e.target.files[0];
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onload = ev => {
+                try {
+                  const imported = JSON.parse(ev.target.result);
+                  if (imported.purchases !== undefined) {
+                    if (window.confirm("⚠️ سيتم استبدال جميع البيانات الحالية. هل أنت متأكد؟")) {
+                      save({ ...defaultData, ...imported });
+                      alert("✅ تم استيراد البيانات بنجاح!");
+                    }
+                  } else {
+                    alert("❌ الملف غير صالح");
+                  }
+                } catch { alert("❌ خطأ في قراءة الملف"); }
+              };
+              reader.readAsText(file);
+              e.target.value = "";
+            }}
+          />
+          <button
+            style={{ ...S.btn("#4a90e2"), width: "100%", background: "none", border: "1px solid #4a90e2", color: "#4a90e2" }}
+            onClick={() => document.getElementById("importFile").click()}
+          >
+            📂 استيراد نسخة احتياطية (JSON)
+          </button>
+        </div>
+      </div>
+
+      {/* ══ N8N WEBHOOK CONFIG ══ */}
+      <div style={{ background: "#060a16", borderRadius: 12, padding: 16, border: "1px solid #e67e2255", marginBottom: 12 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#e67e22", marginBottom: 4 }}>🤖 ربط n8n — الذكاء الاصطناعي الآلي</div>
+        <div style={{ fontSize: 11, color: "#7a8a9a", marginBottom: 14, lineHeight: 1.7 }}>
+          اربط المعمل بـ n8n لاستقبال تقارير صباحية يومية، تنبيهات الديون، وتقارير أسبوعية — كلها تُرسل تلقائياً على تيليجرام.
+        </div>
+
+        <div style={{ marginBottom: 10 }}>
+          <label style={{ ...S.label, color: "#e67e22" }}>Webhook URL (من n8n)</label>
+          <input
+            style={{ ...S.input, fontFamily: "monospace", fontSize: 11 }}
+            placeholder="https://your-n8n.app/webhook/factory-report"
+            value={n8nWebhook}
+            onChange={e => setN8nWebhook(e.target.value)}
+          />
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ ...S.label, color: "#e67e22" }}>Secret Key (كلمة سر اختيارية)</label>
+          <input
+            style={{ ...S.input, fontFamily: "monospace", fontSize: 11 }}
+            placeholder="my-secret-key-2024"
+            value={n8nSecret}
+            onChange={e => setN8nSecret(e.target.value)}
+          />
+          <div style={{ fontSize: 10, color: "#4a5a6a", marginTop: 4 }}>يُستخدم للتحقق من مصدر الطلب في n8n</div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+          <button
+            style={{ flex: 1, background: "#e67e2222", border: "1px solid #e67e22", borderRadius: 8, padding: "9px", color: "#e67e22", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700 }}
+            onClick={testN8nWebhook}
+            disabled={!n8nWebhook}
+          >
+            {n8nTestStatus === "testing" ? "⏳ جاري الاختبار..." : n8nTestStatus === "ok" ? "✅ يعمل!" : n8nTestStatus === "error" ? "❌ فشل" : "🔌 اختبار الاتصال"}
+          </button>
+          <button
+            style={{ flex: 1, background: "#27ae6022", border: "1px solid #27ae60", borderRadius: 8, padding: "9px", color: "#27ae60", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700 }}
+            onClick={saveN8nCfg}
+            disabled={!n8nWebhook}
+          >
+            💾 حفظ الإعدادات
+          </button>
+        </div>
+
+        <button
+          style={{ width: "100%", background: "linear-gradient(135deg, #e67e22, #f39c12)", border: "none", borderRadius: 8, padding: "10px", color: "#0f1117", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700, marginBottom: 10 }}
+          onClick={sendManualReport}
+          disabled={!n8nWebhook}
+        >
+          📤 إرسال تقرير يدوي الآن ← تيليجرام
+        </button>
+
+        <div style={{ background: "#0a0d10", borderRadius: 8, padding: 10, fontSize: 11, color: "#7a8a9a" }}>
+          <div style={{ color: "#e67e22", fontWeight: 700, marginBottom: 6 }}>⚙️ ما يفعله n8n تلقائياً:</div>
+          <div style={{ lineHeight: 2 }}>
+            🌅 <span style={{color:"#f0b429"}}>كل صباح 8:00</span> — تقرير مالي شامل على تيليجرام<br/>
+            ⚠️ <span style={{color:"#e55444"}}>كل يوم 10:00</span> — تنبيه بالديون المتأخرة (+30 يوم)<br/>
+            📊 <span style={{color:"#4a90e2"}}>كل جمعة 9:00</span> — تقرير أسبوعي مفصّل بالمقارنة<br/>
+            📤 <span style={{color:"#27ae60"}}>يدوي</span> — أرسل تقرير فوري من هنا في أي وقت
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+// ==================== EXPENSES ====================
+const EXPENSE_CATS = [
+  { id: "rent", label: "إيجار", icon: "🏠" },
+  { id: "food", label: "طعام", icon: "🍽️" },
+  { id: "transport", label: "نقل", icon: "🚗" },
+  { id: "misc", label: "نثرية", icon: "📎" },
+  { id: "electricity", label: "كهرباء", icon: "⚡" },
+  { id: "internet", label: "إنترنت", icon: "🌐" },
+];
+
+
+function Expenses({ data, save, isReadOnly }) {
+  const [form, setForm] = useState({ date: today(), category: "rent", amount: "", notes: "" });
+  const [lastSaved, setLastSaved] = useState(null);
+
+  const expenses = data.expenses || [];
+
+  const add = () => {
+    if (!form.amount || isReadOnly) return;
+    const rec = { id: uid(), ...form, amount: parseFloat(form.amount) };
+    save({ ...data, expenses: [...expenses, rec] });
+    setLastSaved(EXPENSE_CATS.find(c => c.id === form.category)?.label);
+    setForm(f => ({ ...f, amount: "", notes: "" }));
+  };
+
+  const del = (id) => save({ ...data, expenses: expenses.filter(e => e.id !== id) });
+
+  const total = expenses.reduce((s, e) => s + e.amount, 0);
+  const byCat = EXPENSE_CATS.map(c => ({
+    ...c,
+    total: expenses.filter(e => e.category === c.id).reduce((s, e) => s + e.amount, 0),
+  }));
+
+  return (
+    <>
+      <h2 style={{ color: "#f0b429", margin: "0 0 16px 0", fontSize: 18 }}>🧾 المصاريف العامة</h2>
+
+      {isReadOnly && (
+        <div style={{ background: "#0d0820", border: "1px solid #9b59b644", borderRadius: 10, padding: "10px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+          <span style={{ fontSize: 18 }}>👁️</span>
+          <span style={{ color: "#9b59b6", fontWeight: 700 }}>وضع المراقبة — لا يمكن إضافة أو تعديل البيانات من هذا الجهاز</span>
+        </div>
+      )}
+
+
+      {/* Category summary */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, marginBottom: 16 }}>
+        {byCat.map(c => (
+          <div key={c.id} style={S.kpi("#e55444")}>
+            <div style={{ fontSize: 18, marginBottom: 2 }}>{c.icon}</div>
+            <div style={{ fontSize: 11, color: "#c8a0a0", fontWeight: 700 }}>{c.label}</div>
+            <div style={{ fontSize: 13, color: c.total > 0 ? "#e55444" : "#4a5a6a", fontWeight: 700, marginTop: 4 }}>{fmt(c.total)}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Total */}
+      <div style={{ ...S.card, background: "#1a0a0a", border: "1px solid #e5544444", marginBottom: 16, padding: "12px 16px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ color: "#7a8a9a", fontSize: 14 }}>إجمالي المصاريف</span>
+          <span style={{ color: "#e55444", fontWeight: 700, fontSize: 22 }}>{fmt(total)}</span>
+        </div>
+      </div>
+
+      {/* Form — always open */}
+      <div style={{ ...S.card, border: "1px solid #e5544444", background: "#13100f" }}>
+        <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
+          <span>➕ إضافة مصروف</span>
+          {lastSaved && <span style={{ fontSize: 11, color: "#4caf50", fontWeight: 400 }}>✅ تم حفظ: {lastSaved}</span>}
+        </div>
+        <div style={S.formGrid}>
+          <div style={S.formField}>
+            <label style={S.label}>التاريخ</label>
+            <input type="date" style={S.input} value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} />
+          </div>
+          <div style={S.formField}>
+            <label style={S.label}>نوع المصروف</label>
+            <select style={S.select} value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))}>
+              {EXPENSE_CATS.map(c => <option key={c.id} value={c.id}>{c.icon} {c.label}</option>)}
+            </select>
+          </div>
+          <div style={S.formField}>
+            <label style={S.label}>المبلغ (د.ع)</label>
+            <input type="number" style={S.input} placeholder="المبلغ" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} />
+          </div>
+          <div style={S.formField}>
+            <label style={S.label}>ملاحظات</label>
+            <input style={S.input} placeholder="تفاصيل اختيارية" value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
+          </div>
+        </div>
+        <button style={{ ...S.btn("#e55444"), width: "100%", opacity: !form.amount ? 0.4 : 1 }} onClick={add}>
+          💾 حفظ المصروف
+        </button>
+      </div>
+
+      {/* Table */}
+      <div style={S.card}>
+        <div style={S.cardTitle}>📋 سجل المصاريف</div>
+        {expenses.length === 0 ? (
+          <div style={S.emptyState}>🧾 لا توجد مصاريف مسجلة</div>
+        ) : (
+          <table style={S.table}>
+            <thead><tr>
+              <th style={S.th}>التاريخ</th>
+              <th style={S.th}>النوع</th>
+              <th style={S.th}>المبلغ</th>
+              <th style={S.th}>ملاحظات</th>
+              <th style={S.th}></th>
+            </tr></thead>
+            <tbody>
+              {[...expenses].reverse().map(e => {
+                const cat = EXPENSE_CATS.find(c => c.id === e.category);
+                return (
+                  <tr key={e.id}>
+                    <td style={S.td}>{e.date}</td>
+                    <td style={S.td}>
+                      <span style={S.badge("#e55444")}>{cat?.icon} {cat?.label}</span>
+                    </td>
+                    <td style={{ ...S.td, fontWeight: 700, color: "#e55444" }}>{fmt(e.amount)}</td>
+                    <td style={{ ...S.td, color: "#7a8a9a", fontSize: 11 }}>{e.notes}</td>
+                    <td style={S.td}><button style={S.btnDanger} onClick={() => {if(window.confirm("هل أنت متأكد من حذف هذا السجل؟"))del(e.id)}}>🗑</button></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ==================== AI ASSISTANT ====================
+const AI_KEY_STORAGE = "cardboard_ai_key";
+const AI_PROVIDER_STORAGE = "cardboard_ai_provider";
+const AI_HISTORY_KEY = "cardboard_ai_history";
+
+function getAIKey() { try { return localStorage.getItem(AI_KEY_STORAGE) || ""; } catch { return ""; } }
+function setAIKey(k) { try { localStorage.setItem(AI_KEY_STORAGE, k); } catch {} }
+function getAIProvider() { try { return localStorage.getItem(AI_PROVIDER_STORAGE) || "gemini"; } catch { return "gemini"; } }
+function setAIProviderStorage(p) { try { localStorage.setItem(AI_PROVIDER_STORAGE, p); } catch {} }
+
+function AIAssistant({ data }) {
+  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [apiKey, setApiKeyState] = useState(() => getAIKey());
+  const [provider, setProviderState] = useState(() => getAIProvider());
+  const [showSettings, setShowSettings] = useState(false);
+  const [tempKey, setTempKey] = useState("");
+  const chatRef = React.useRef(null);
+
+  useEffect(() => {
+    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+  }, [messages]);
+
+  // Build factory context summary for AI
+  const buildContext = () => {
+    const todayStr = today();
+    const totalPurchases = data.purchases.reduce((s, p) => s + (p.total || 0), 0);
+    const totalSales = data.sales.reduce((s, p) => s + (p.total || 0), 0);
+    const totalWorkers = data.workers.reduce((s, w) => {
+      return s + (w.wage||0) + (w.extraPay||0) - (w.advance||0);
+    }, 0);
+    const totalMachinery = data.machinery.reduce((s, m) => s + (m.amount || 0), 0);
+    const totalExpenses = (data.expenses || []).reduce((s, e) => s + (e.amount || 0), 0);
+    const netProfit = totalSales - (totalPurchases + totalWorkers + totalMachinery + totalExpenses);
+
+    const pendingDebtsIn = data.debts.filter(d => d.type === "customer" && d.status !== "paid")
+      .reduce((s, d) => s + ((d.amount || 0) - (d.payments || []).reduce((a, p) => a + p.amount, 0)), 0);
+    const pendingDebtsOut = data.debts.filter(d => d.type === "supplier" && d.status !== "paid")
+      .reduce((s, d) => s + ((d.amount || 0) - (d.payments || []).reduce((a, p) => a + p.amount, 0)), 0);
+
+    const todaySales = data.sales.filter(s => s.date === todayStr);
+    const todayPurchases = data.purchases.filter(p => p.date === todayStr);
+    const todayExpenses = (data.expenses || []).filter(e => e.date === todayStr);
+    const queueCount = (data.pendingWeighs || []).length;
+    const salesQueueCount = (data.pendingSales || []).length;
+
+    // جلب بيانات آخر 30 يوماً فقط لتجنب استنزاف التوكنز
+    const thirtyDaysAgo = new Date(new Date().getTime() - 30*24*60*60*1000).toISOString().split("T")[0];
+    const recentPurchases = data.purchases.filter(p => p.date >= thirtyDaysAgo);
+    const recentSales = data.sales.filter(s => s.date >= thirtyDaysAgo);
+
+    // Supplier summary (آخر 30 يوم)
+    const supplierTotals = {};
+    recentPurchases.forEach(p => {
+      if (!supplierTotals[p.supplier]) supplierTotals[p.supplier] = { count: 0, weight: 0, total: 0 };
+      supplierTotals[p.supplier].count++;
+      supplierTotals[p.supplier].weight += (p.weight || 0);
+      supplierTotals[p.supplier].total += (p.total || 0);
+    });
+
+    // Customer summary (آخر 30 يوم)
+    const customerTotals = {};
+    recentSales.forEach(s => {
+      if (!customerTotals[s.customer]) customerTotals[s.customer] = { count: 0, weight: 0, total: 0 };
+      customerTotals[s.customer].count++;
+      customerTotals[s.customer].weight += (s.weight || 0);
+      customerTotals[s.customer].total += (s.total || 0);
+    });
+
+    // Last 7 days trend
+    const last7 = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(new Date().getTime() + (3*60*60000) - i*86400000).toISOString().split("T")[0];
+      const daySales = data.sales.filter(s => s.date === d).reduce((a,s) => a + s.total, 0);
+      const dayPurchases = data.purchases.filter(p => p.date === d).reduce((a,p) => a + p.total, 0);
+      last7.push({ date: d, sales: daySales, purchases: dayPurchases, net: daySales - dayPurchases });
+    }
+
+    return `أنت مساعد ذكي لمعمل كبس الكارتون. تحلل البيانات وتعطي نصائح واقتراحات بالعربي العراقي. تجاوب بشكل مختصر ومفيد.
+العملة: دينار عراقي (د.ع)
+
+═══ ملخص مالي عام ═══
+• إجمالي المبيعات: ${totalSales.toLocaleString()} د.ع (${data.sales.length} عملية)
+• إجمالي المشتريات: ${totalPurchases.toLocaleString()} د.ع (${data.purchases.length} عملية)
+• رواتب العمال: ${totalWorkers.toLocaleString()} د.ع (${data.workers.length} عامل)
+• مصاريف الآليات: ${totalMachinery.toLocaleString()} د.ع
+• مصاريف عامة: ${totalExpenses.toLocaleString()} د.ع
+• صافي الربح: ${netProfit.toLocaleString()} د.ع ${netProfit >= 0 ? "✅ ربح" : "❌ خسارة"}
+
+═══ الديون ═══
+• ديون الزبائن (لنا): ${pendingDebtsIn.toLocaleString()} د.ع (${data.debts.filter(d=>d.type==="customer"&&d.status!=="paid").length} دين)
+• ديون المجهزين (علينا): ${pendingDebtsOut.toLocaleString()} د.ع (${data.debts.filter(d=>d.type==="supplier"&&d.status!=="paid").length} دين)
+
+═══ اليوم (${todayStr}) ═══
+• مبيعات اليوم: ${todaySales.reduce((a,s)=>a+s.total,0).toLocaleString()} د.ع (${todaySales.length} عملية)
+• مشتريات اليوم: ${todayPurchases.reduce((a,p)=>a+p.total,0).toLocaleString()} د.ع (${todayPurchases.length} عملية)
+• مصاريف اليوم: ${todayExpenses.reduce((a,e)=>a+e.amount,0).toLocaleString()} د.ع
+• طابور المشتريات: ${queueCount} شاحنة
+• طابور المبيعات المعلقة: ${salesQueueCount} شحنة
+
+═══ الشركاء ═══
+${data.partners.map(p => `• ${p.name}: ${p.share}% — حصته من الربح: ${Math.round(netProfit * p.share / 100).toLocaleString()} د.ع`).join("\n")}
+
+═══ المجهزين — آخر 30 يوم ═══
+${Object.entries(supplierTotals).map(([name, d]) => `• ${name}: ${d.count} شحنة، ${d.weight.toLocaleString()} كغم، ${d.total.toLocaleString()} د.ع`).join("\n") || "لا توجد بيانات"}
+
+═══ الزبائن — آخر 30 يوم ═══
+${Object.entries(customerTotals).map(([name, d]) => `• ${name}: ${d.count} عملية، ${d.weight.toLocaleString()} طن، ${d.total.toLocaleString()} د.ع`).join("\n") || "لا توجد بيانات"}
+
+═══ آخر 7 أيام ═══
+${last7.map(d => `${d.date}: مبيعات ${d.sales.toLocaleString()} — مشتريات ${d.purchases.toLocaleString()} — صافي ${d.net.toLocaleString()}`).join("\n")}
+
+═══ تفاصيل الديون المعلقة ═══
+${data.debts.filter(d => d.status !== "paid").map(d => {
+  const paid = (d.payments || []).reduce((a,p) => a+p.amount, 0);
+  return `• ${d.type === "customer" ? "زبون" : "مجهز"}: ${d.name} — المبلغ: ${(d.amount||0).toLocaleString()} — المدفوع: ${paid.toLocaleString()} — الباقي: ${((d.amount||0)-paid).toLocaleString()} د.ع`;
+}).join("\n") || "لا توجد ديون معلقة"}
+
+═══ العمال ═══
+${data.workers.map(w => `• ${w.name}: ${w.role || "عامل"} — الأجر: ${(w.wage||0).toLocaleString()} د.ع${(w.extraPay||0) > 0 ? ` + إضافي: ${(w.extraPay).toLocaleString()}` : ""} — سلفة: ${(w.advance||0).toLocaleString()}`).join("\n") || "لا يوجد عمال"}
+
+═══ المصاريف الأخيرة ═══
+${(data.expenses || []).slice(-10).map(e => `• ${e.date}: ${e.category} — ${(e.amount||0).toLocaleString()} د.ع ${e.notes ? "— " + e.notes : ""}`).join("\n") || "لا توجد مصاريف"}
+
+═══ تعليمات صارمة ═══
+• أجب باختصار شديد.
+• اعتمد فقط على الأرقام المرفقة أعلاه، ولا تقم بعمليات رياضية معقدة من عندك.
+• إذا سُئلت عن بيانات غير موجودة، قل "البيانات غير متوفرة".
+• لا تختلق أرقام أو إحصائيات غير موجودة بالبيانات.
+• بيانات المجهزين والزبائن محدودة لآخر 30 يوم فقط.
+`;
+  };
+
+  const sendMessage = async (text) => {
+    if (!text.trim()) return;
+    if (!apiKey) { setShowSettings(true); return; }
+
+    const userMsg = { role: "user", content: text };
+    const newMessages = [...messages, userMsg];
+    setMessages(newMessages);
+    setInput("");
+    setLoading(true);
+
+    try {
+      let assistantText = "";
+
+      if (provider === "anthropic") {
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+            "anthropic-dangerous-direct-browser-access": "true",
+          },
+          body: JSON.stringify({
+            model: "claude-3-5-sonnet-latest",
+            max_tokens: 1500,
+            system: buildContext(),
+            messages: newMessages.map(m => ({ role: m.role, content: m.content })),
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error?.message || `HTTP ${res.status}`);
+        }
+        const result = await res.json();
+        assistantText = result.content.map(c => c.text || "").join("");
+      } else if (provider === "gemini") {
+        // Google Gemini
+        const geminiMessages = newMessages.map(m => ({
+          role: m.role === "assistant" ? "model" : "user",
+          parts: [{ text: m.content }],
+        }));
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: buildContext() }] },
+            contents: geminiMessages,
+            generationConfig: { maxOutputTokens: 1500 },
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error?.message || `HTTP ${res.status}`);
+        }
+        const result = await res.json();
+        assistantText = result.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "لم أتمكن من الرد";
+      } else {
+        // OpenAI compatible
+        const res = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model: "gpt-4o-mini",
+            max_tokens: 1500,
+            messages: [
+              { role: "system", content: buildContext() },
+              ...newMessages.map(m => ({ role: m.role, content: m.content })),
+            ],
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error?.message || `HTTP ${res.status}`);
+        }
+        const result = await res.json();
+        assistantText = result.choices[0]?.message?.content || "";
+      }
+
+      setMessages([...newMessages, { role: "assistant", content: assistantText }]);
+    } catch (err) {
+      setMessages([...newMessages, { role: "assistant", content: `⚠️ خطأ: ${err.message}\n\nتأكد من مفتاح API والاتصال بالإنترنت.` }]);
+    }
+    setLoading(false);
+  };
+
+  const QUICK_PROMPTS = [
+    { icon: "📊", text: "تقرير اليوم", prompt: "اعطيني تقرير سريع عن اليوم — المبيعات والمشتريات والصافي" },
+    { icon: "💰", text: "تحليل الأرباح", prompt: "حلل لي الأرباح والخسائر بالتفصيل واعطيني نصائح للتحسين" },
+    { icon: "⚠️", text: "تنبيهات", prompt: "شنو الأشياء اللي لازم أنتبه لها؟ ديون متأخرة، مشاكل، تحذيرات؟" },
+    { icon: "📈", text: "أداء الأسبوع", prompt: "حلل أداء آخر 7 أيام وقارن بين الأيام" },
+    { icon: "🤝", text: "حصص الشركاء", prompt: "اعطيني تفصيل حصص كل شريك من الأرباح" },
+    { icon: "🚛", text: "أفضل مجهز", prompt: "منو أفضل مجهز (مورد) من حيث الكمية والسعر؟" },
+  ];
+
+  // Settings panel
+  const SettingsPanel = () => (
+    <div style={{ padding: 16 }}>
+      <div style={{ textAlign: "center", marginBottom: 16 }}>
+        <div style={{ fontSize: 36, marginBottom: 8 }}>🔑</div>
+        <div style={{ fontSize: 15, fontWeight: 700, color: "#e8e0d5" }}>إعداد مفتاح API</div>
+        <div style={{ fontSize: 11, color: "#7a8a9a", marginTop: 4, lineHeight: 1.6 }}>
+          المساعد الذكي يحتاج مفتاح API للعمل<br/>
+          المفتاح يُحفظ محلياً في جهازك فقط
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ fontSize: 12, color: "#7a8a9a", display: "block", marginBottom: 4 }}>المزوّد</label>
+        <select
+          style={{ ...S.select, fontSize: 13 }}
+          value={provider}
+          onChange={e => { setProviderState(e.target.value); setAIProviderStorage(e.target.value); }}
+        >
+          <option value="gemini">🌟 Google Gemini (مجاني!)</option>
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="openai">OpenAI (GPT)</option>
+        </select>
+      </div>
+
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ fontSize: 12, color: "#7a8a9a", display: "block", marginBottom: 4 }}>
+          {provider === "gemini" ? "مفتاح Google Gemini API" : provider === "anthropic" ? "مفتاح Anthropic API" : "مفتاح OpenAI API"}
+        </label>
+        <input
+          type="password"
+          style={{ ...S.input, fontSize: 13, direction: "ltr", textAlign: "left" }}
+          placeholder={provider === "gemini" ? "AIza..." : provider === "anthropic" ? "sk-ant-..." : "sk-..."}
+          value={tempKey || apiKey}
+          onChange={e => setTempKey(e.target.value)}
+        />
+      </div>
+
+      <div style={{ fontSize: 10, color: "#4a5a6a", marginBottom: 12, lineHeight: 1.6 }}>
+        {provider === "gemini"
+          ? "🌟 مجاني! احصل على المفتاح من: aistudio.google.com → Get API Key"
+          : provider === "anthropic"
+          ? "احصل على المفتاح من: console.anthropic.com → API Keys"
+          : "احصل على المفتاح من: platform.openai.com → API Keys"
+        }
+      </div>
+
+      <button
+        style={{ ...S.btn("#4a90e2"), width: "100%", marginBottom: 8 }}
+        onClick={() => {
+          const key = tempKey || apiKey;
+          if (key) { setApiKeyState(key); setAIKey(key); setTempKey(""); setShowSettings(false); }
+        }}
+      >
+        💾 حفظ المفتاح
+      </button>
+
+      {apiKey && (
+        <button
+          style={{ ...S.btn("#e55444"), width: "100%", fontSize: 12, padding: "8px" }}
+          onClick={() => { setApiKeyState(""); setAIKey(""); setTempKey(""); }}
+        >
+          🗑 حذف المفتاح
+        </button>
+      )}
+    </div>
+  );
+
+  return (
+    <>
+      {/* Floating Button */}
+      <button
+        onClick={() => setOpen(!open)}
+        style={{
+          position: "fixed",
+          bottom: 20,
+          left: 20,
+          zIndex: 9998,
+          width: 56,
+          height: 56,
+          borderRadius: "50%",
+          background: open ? "#e55444" : "linear-gradient(135deg, #4a90e2, #6c5ce7)",
+          border: "2px solid " + (open ? "#e5544466" : "#4a90e266"),
+          cursor: "pointer",
+          fontSize: 24,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          boxShadow: "0 4px 20px rgba(74,144,226,0.4)",
+          transition: "all 0.3s ease",
+          animation: !open && messages.length === 0 ? "pulse-ai 2s infinite" : "none",
+        }}
+      >
+        {open ? "✕" : "🤖"}
+      </button>
+
+      <style>{`
+        @keyframes pulse-ai {
+          0%, 100% { box-shadow: 0 4px 20px rgba(74,144,226,0.4); }
+          50% { box-shadow: 0 4px 30px rgba(74,144,226,0.8), 0 0 60px rgba(108,92,231,0.3); }
+        }
+      `}</style>
+
+      {/* Chat Panel */}
+      {open && (
+        <div style={{
+          position: "fixed",
+          bottom: 86,
+          left: 20,
+          right: 20,
+          maxWidth: 420,
+          height: "min(70vh, 550px)",
+          zIndex: 9997,
+          background: "#0f1420",
+          border: "1px solid #2a3a50",
+          borderRadius: 16,
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          boxShadow: "0 10px 50px rgba(0,0,0,0.7)",
+          fontFamily: "'Cairo', sans-serif",
+          direction: "rtl",
+        }}>
+          {/* Header */}
+          <div style={{
+            background: "linear-gradient(135deg, #1a2540, #0f1a30)",
+            padding: "12px 16px",
+            borderBottom: "1px solid #2a3a50",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{
+                width: 36, height: 36, borderRadius: "50%",
+                background: "linear-gradient(135deg, #4a90e2, #6c5ce7)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 18,
+              }}>🤖</div>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#e8e0d5" }}>المساعد الذكي</div>
+                <div style={{ fontSize: 10, color: apiKey ? "#27ae60" : "#e67e22" }}>
+                  {apiKey ? "● متصل" : "● يحتاج مفتاح API"}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button onClick={() => setShowSettings(!showSettings)} style={{
+                background: "none", border: "1px solid #2a3545", borderRadius: 8,
+                padding: "4px 8px", color: "#7a8a9a", cursor: "pointer", fontSize: 14,
+              }}>⚙️</button>
+              <button onClick={() => { setMessages([]); }} style={{
+                background: "none", border: "1px solid #2a3545", borderRadius: 8,
+                padding: "4px 8px", color: "#7a8a9a", cursor: "pointer", fontSize: 14,
+              }}>🗑</button>
+            </div>
+          </div>
+
+          {/* Content */}
+          <div ref={chatRef} style={{
+            flex: 1, overflowY: "auto", padding: 12,
+            display: "flex", flexDirection: "column", gap: 10,
+          }}>
+            {showSettings ? <SettingsPanel /> : (
+              <>
+                {messages.length === 0 && (
+                  <div style={{ textAlign: "center", padding: "20px 10px" }}>
+                    <div style={{ fontSize: 40, marginBottom: 12 }}>🤖</div>
+                    <div style={{ fontSize: 14, color: "#e8e0d5", fontWeight: 700, marginBottom: 6 }}>
+                      مرحباً! أنا المساعد الذكي للمعمل
+                    </div>
+                    <div style={{ fontSize: 12, color: "#7a8a9a", marginBottom: 16, lineHeight: 1.7 }}>
+                      أكدر أحلل بياناتك، أعطيك تقارير، تنبيهات، ونصائح.
+                      <br/>جرّب تسألني أي سؤال أو اختر من الاقتراحات:
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "center" }}>
+                      {QUICK_PROMPTS.map((q, i) => (
+                        <button key={i} onClick={() => sendMessage(q.prompt)} style={{
+                          background: "#161d2b", border: "1px solid #2a3a50", borderRadius: 20,
+                          padding: "6px 12px", color: "#c8d8e8", cursor: "pointer",
+                          fontSize: 11, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4,
+                          transition: "all 0.2s",
+                        }}>
+                          <span>{q.icon}</span> {q.text}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {messages.map((msg, i) => (
+                  <div key={i} style={{
+                    display: "flex",
+                    justifyContent: msg.role === "user" ? "flex-end" : "flex-start",
+                  }}>
+                    <div style={{
+                      maxWidth: "85%",
+                      background: msg.role === "user"
+                        ? "linear-gradient(135deg, #4a90e2, #2980b9)"
+                        : "#1a2235",
+                      border: msg.role === "user" ? "none" : "1px solid #2a3545",
+                      borderRadius: msg.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
+                      padding: "10px 14px",
+                      fontSize: 13,
+                      color: "#e8e0d5",
+                      lineHeight: 1.7,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                    }}>
+                      {msg.content}
+                    </div>
+                  </div>
+                ))}
+
+                {loading && (
+                  <div style={{ display: "flex", justifyContent: "flex-start" }}>
+                    <div style={{
+                      background: "#1a2235", border: "1px solid #2a3545",
+                      borderRadius: "16px 16px 16px 4px", padding: "12px 18px",
+                      fontSize: 13, color: "#7a8a9a",
+                    }}>
+                      <span style={{ animation: "pulse-ai 1s infinite" }}>🤖</span> جاري التحليل...
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Quick prompts bar (when there are messages) */}
+          {messages.length > 0 && !showSettings && (
+            <div style={{
+              padding: "4px 8px", borderTop: "1px solid #1e2530",
+              display: "flex", gap: 4, overflowX: "auto",
+            }}>
+              {QUICK_PROMPTS.slice(0, 4).map((q, i) => (
+                <button key={i} onClick={() => sendMessage(q.prompt)} style={{
+                  background: "#0d1117", border: "1px solid #1e2530", borderRadius: 12,
+                  padding: "3px 8px", color: "#7a8a9a", cursor: "pointer",
+                  fontSize: 10, fontFamily: "inherit", whiteSpace: "nowrap",
+                }}>
+                  {q.icon} {q.text}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Input */}
+          {!showSettings && (
+            <div style={{
+              padding: "10px 12px",
+              borderTop: "1px solid #2a3545",
+              display: "flex",
+              gap: 8,
+              alignItems: "center",
+              background: "#0d1117",
+            }}>
+              <input
+                style={{
+                  flex: 1,
+                  background: "#161d2b",
+                  border: "1px solid #2a3545",
+                  borderRadius: 20,
+                  padding: "9px 14px",
+                  color: "#e8e0d5",
+                  fontSize: 13,
+                  fontFamily: "inherit",
+                  outline: "none",
+                }}
+                placeholder={apiKey ? "اسأل عن بيانات المعمل..." : "أدخل مفتاح API أولاً ⚙️"}
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && !loading && sendMessage(input)}
+                disabled={loading}
+              />
+              <button
+                onClick={() => sendMessage(input)}
+                disabled={loading || !input.trim()}
+                style={{
+                  width: 38, height: 38, borderRadius: "50%",
+                  background: loading || !input.trim() ? "#1a2235" : "linear-gradient(135deg, #4a90e2, #6c5ce7)",
+                  border: "none", cursor: loading ? "not-allowed" : "pointer",
+                  color: "#fff", fontSize: 16,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}
+              >
+                ↑
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ==================== MAIN APP ====================
+const TABS = [
+  { id: "dashboard", label: "الرئيسية", icon: "dashboard" },
+  { id: "purchases", label: "المشتريات", icon: "purchases" },
+  { id: "sales", label: "المبيعات", icon: "sales" },
+  { id: "machinery", label: "الآليات", icon: "machinery" },
+  { id: "workers", label: "الموظفون", icon: "workers" },
+  { id: "expenses", label: "المصاريف", icon: "expenses" },
+  { id: "debts", label: "الديون", icon: "debts" },
+  { id: "reports", label: "التقارير", icon: "reports" },
+  { id: "settings", label: "الإعدادات", icon: "settings" },
+];
+
+function App() {
+  const {
+    data, save: rawSave, loaded,
+    token, hasSb, isReadOnly,
+    syncStatus, lastSync,
+    signIn, signOut, forceSync, updateSbCfg,
+    showLogin, setShowLogin,
+  } = useStorage();
+
+  const [tab, setTab]           = useState("dashboard");
+  const [unlocked, setUnlocked] = useState(false);
+
+  const save = isReadOnly
+    ? () => alert("وضع المشاهدة فقط\nلا يمكن الإدخال أو التعديل من هذا الجهاز.")
+    : rawSave;
+
+  if (!loaded) {
+    return (
+      <div style={{ ...S.app, justifyContent: "center", alignItems: "center", fontSize: 18, color: "#f0b429" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>🏭</div>
+          <div>جاري تحميل النظام...</div>
+          {hasSb && <div style={{ fontSize: 13, color: "#4a90e2", marginTop: 8 }}>جاري المزامنة مع السحابة...</div>}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={S.app}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap');
+        * { box-sizing: border-box; }
+        ::-webkit-scrollbar { width: 4px; height: 4px; }
+        ::-webkit-scrollbar-track { background: #0d1117; }
+        ::-webkit-scrollbar-thumb { background: #2a3545; border-radius: 2px; }
+        input[type=number]::-webkit-inner-spin-button { opacity: 0.5; }
+        select option { background: #0d1117; }
+        tr:hover td { background: rgba(255,255,255,0.02); }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+      `}</style>
+
+      {/* Header */}
+      <div style={{ ...S.header, justifyContent: "space-between" }}>
+        <div style={S.headerTitle}>
+          🏭 {data.settings?.factoryName || "معمل كبس الكارتون"}
+        </div>
+        <SyncBar
+          hasSb={hasSb} isReadOnly={isReadOnly} token={token}
+          syncStatus={syncStatus} lastSync={lastSync} forceSync={forceSync}
+          onLoginClick={() => setShowLogin(true)}
+          onSignOut={() => signOut()}
+        />
+      </div>
+
+      {/* شريط المشاهدة */}
+      {isReadOnly && (
+        <div style={{
+          background: "#1a0a25", borderBottom: "1px solid #9b59b633",
+          padding: "5px 16px", fontSize: 11, color: "#9b59b6",
+          display: "flex", alignItems: "center", gap: 8, justifyContent: "center",
+        }}>
+          <span>👁</span>
+          <span>وضع المشاهدة — يتجدد كل 30 ثانية — لا يمكن الإدخال</span>
+          <button onClick={() => setShowLogin(true)} style={{
+            background: "none", border: "1px solid #9b59b6", borderRadius: 6,
+            padding: "1px 8px", color: "#9b59b6", cursor: "pointer",
+            fontFamily: "inherit", fontSize: 10,
+          }}>دخول للإدخال</button>
+        </div>
+      )}
+
+      {/* Navigation */}
+      <nav style={S.nav}>
+        {TABS.map((t) => (
+          <button key={t.id} style={S.navBtn(tab === t.id)} onClick={() => setTab(t.id)}>
+            <Icon name={t.icon} size={15} />
+            {t.label}
+            {t.id === "purchases" && (data.pendingWeighs||[]).length > 0 && (
+              <span style={{ background: "#e67e22", color: "#fff", borderRadius: 10, padding: "1px 6px", fontSize: 10, fontWeight: 700 }}>
+                {(data.pendingWeighs||[]).length}
+              </span>
+            )}
+            {t.id === "sales" && (data.pendingSales||[]).length > 0 && (
+              <span style={{ background: "#27ae60", color: "#fff", borderRadius: 10, padding: "1px 6px", fontSize: 10, fontWeight: 700 }}>
+                {(data.pendingSales||[]).length}
+              </span>
+            )}
+          </button>
+        ))}
+      </nav>
+
+      {/* Content */}
+      <div style={S.content}>
+        {tab === "dashboard" && <Dashboard data={data} unlocked={unlocked} />}
+        {tab === "purchases" && <Purchases data={data} save={save} isReadOnly={isReadOnly} />}
+        {tab === "sales"     && <Sales     data={data} save={save} isReadOnly={isReadOnly} />}
+        {tab === "machinery" && <Machinery data={data} save={save} isReadOnly={isReadOnly} />}
+        {tab === "workers"   && <Workers   data={data} save={save} isReadOnly={isReadOnly} />}
+        {tab === "expenses"  && <Expenses  data={data} save={save} isReadOnly={isReadOnly} />}
+        {tab === "debts"     && <Debts     data={data} save={save} isReadOnly={isReadOnly} />}
+        {tab === "reports"   && (
+          <Reports
+            data={data} save={save}
+            unlocked={unlocked}
+            onUnlock={() => setUnlocked(true)}
+            onLock={() => setUnlocked(false)}
+          />
+        )}
+        {tab === "settings"  && (
+          <Settings
+            data={data} save={save}
+            updateSbCfg={updateSbCfg}
+            hasSb={hasSb} token={token}
+            syncStatus={syncStatus}
+            onLoginClick={() => setShowLogin(true)}
+            onSignOut={() => signOut()}
+          />
+        )}
+      </div>
+
+      {/* AI Assistant - يظهر فقط لصاحب المعمل بعد فك القفل */}
+      {unlocked && <AIAssistant data={data} />}
+
+      {/* Login Modal */}
+      {showLogin && (
+        <LoginModal
+          onSignIn={signIn}
+          onClose={() => setShowLogin(false)}
+          onReadOnly={() => {
+            const cfg = getSbCfg();
+            setSbCfg({ ...cfg, mode: "read" });
+            setShowLogin(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
